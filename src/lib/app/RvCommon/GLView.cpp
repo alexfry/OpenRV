@@ -723,22 +723,42 @@ namespace Rv
         }
 
         // CPU readback fallback (slower; used if interop unavailable).
+        // GL FBO is RGBA16F — read half floats (not float32) so upload matches RGBA16F
+        // and we move half the bytes over PCIe vs GL_FLOAT.
         if (vk && m_floatPresentFbo && m_floatPresentFbo->isValid() && needsFloatPresentTransfer())
         {
             const int w = m_floatPresentFbo->width();
             const int h = m_floatPresentFbo->height();
-            std::vector<float> pixels(size_t(w) * size_t(h) * 4);
+#ifndef GL_HALF_FLOAT
+#define GL_HALF_FLOAT 0x140B
+#endif
+            std::vector<uint16_t> pixels(size_t(w) * size_t(h) * 4);
             m_floatPresentFbo->bind();
             glReadBuffer(GL_COLOR_ATTACHMENT0);
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
-            glReadPixels(0, 0, w, h, GL_RGBA, GL_FLOAT, pixels.data());
+            glReadPixels(0, 0, w, h, GL_RGBA, GL_HALF_FLOAT, pixels.data());
+            const GLenum readErr = glGetError();
             m_floatPresentFbo->release();
 
-            QTimer::singleShot(0, vk, [vk, w, h, data = std::move(pixels)]() mutable {
-                vk->setFrameFloat(w, h, std::move(data));
-            });
-            s_inPresent = false;
-            return;
+            if (readErr != GL_NO_ERROR)
+            {
+                static bool once = false;
+                if (!once)
+                {
+                    once = true;
+                    cerr << "ERROR: glReadPixels HALF_FLOAT failed 0x" << hex << readErr << dec
+                         << "; falling back to 8-bit grab" << endl;
+                }
+                // Fall through to grabFramebuffer below.
+            }
+            else
+            {
+                QTimer::singleShot(0, vk, [vk, w, h, data = std::move(pixels)]() mutable {
+                    vk->setFrameHalf(w, h, std::move(data));
+                });
+                s_inPresent = false;
+                return;
+            }
         }
 
         QImage img = grabFramebuffer();

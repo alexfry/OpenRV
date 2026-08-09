@@ -12,6 +12,7 @@
 #include <QImage>
 #include <QWindow>
 #include <QSize>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -48,8 +49,9 @@ namespace Rv
         };
 
         void setFrame(QImage img);
-        // Float RGBA (top-left origin), for p3extended / EDR headroom (CPU fallback).
-        void setFrameFloat(int width, int height, std::vector<float> rgba);
+        // Half-float RGBA16 (IEEE binary16, top-left origin) for p3extended EDR.
+        // Matches the GL RGBA16F present FBO; half the bandwidth of float32.
+        void setFrameHalf(int width, int height, std::vector<uint16_t> rgba16);
         void setHdrPresent(bool enabled);
         bool hdrPresent() const { return m_hdr; }
         PresentMode presentMode() const { return m_presentMode; }
@@ -87,11 +89,11 @@ namespace Rv
 
         QImage m_pending;
         bool m_hasPending = false;
-        std::vector<float> m_pendingFloat;
-        int m_pendingFloatW = 0;
-        int m_pendingFloatH = 0;
-        bool m_hasPendingFloat = false;
-        bool m_texIsFloat = false;
+        std::vector<uint16_t> m_pendingHalf;
+        int m_pendingHalfW = 0;
+        int m_pendingHalfH = 0;
+        bool m_hasPendingHalf = false;
+        bool m_texIsFloat = false; // true = RGBA16F sample texture
         bool m_hdr = false;
         bool m_running = false;
         int m_swapchainFormat = 0; // QRhiSwapChain::Format as int
@@ -127,7 +129,7 @@ namespace Rv
         ~VulkanPresentWidget() override;
 
         void setFrame(QImage img);
-        void setFrameFloat(int width, int height, std::vector<float> rgba);
+        void setFrameHalf(int width, int height, std::vector<uint16_t> rgba16);
         void setHdrPresent(bool enabled);
         bool hdrPresent() const;
         VulkanPresentWindow* presentWindow() const { return m_window; }

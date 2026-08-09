@@ -189,20 +189,20 @@ namespace Rv
         img.setDevicePixelRatio(1.0);
         m_pending = std::move(img);
         m_hasPending = true;
-        m_hasPendingFloat = false;
-        m_pendingFloat.clear();
+        m_hasPendingHalf = false;
+        m_pendingHalf.clear();
         if (isExposed())
             requestUpdate();
     }
 
-    void VulkanPresentWindow::setFrameFloat(int width, int height, std::vector<float> rgba)
+    void VulkanPresentWindow::setFrameHalf(int width, int height, std::vector<uint16_t> rgba16)
     {
-        if (width <= 0 || height <= 0 || rgba.size() < size_t(width) * size_t(height) * 4)
+        if (width <= 0 || height <= 0 || rgba16.size() < size_t(width) * size_t(height) * 4)
             return;
-        m_pendingFloat = std::move(rgba);
-        m_pendingFloatW = width;
-        m_pendingFloatH = height;
-        m_hasPendingFloat = true;
+        m_pendingHalf = std::move(rgba16);
+        m_pendingHalfW = width;
+        m_pendingHalfH = height;
+        m_hasPendingHalf = true;
         m_hasPending = false;
         m_pending = QImage();
         if (isExposed())
@@ -466,7 +466,7 @@ namespace Rv
         if (!usingGpuInterop() || !m_rhi || !isExposed())
             return;
         m_hasPending = false;
-        m_hasPendingFloat = false;
+        m_hasPendingHalf = false;
         // GL has blitted into the shared image and glFinish'd. GPU-copy into the
         // QRhi-owned texture and present (shared image never leaves GENERAL for GL).
         renderFrame();
@@ -525,14 +525,13 @@ namespace Rv
         if (m_tex && m_texSize == pixelSize && m_texIsFloat == asFloat)
             return;
         m_tex.reset();
-        // CPU float path uploads full float32 pixels (glReadPixels GL_FLOAT) — must be
-        // RGBA32F. RGBA16F reinterprets those bits as half-floats → green static noise.
-        // (Interop uses its own sample texture; it does not go through this upload path.)
-        const QRhiTexture::Format fmt = asFloat ? QRhiTexture::RGBA32F : QRhiTexture::RGBA8;
+        // p3extended: GL FBO is RGBA16F; CPU path reads GL_HALF_FLOAT and uploads here.
+        // Half matches the render target and is ~½ the PCIe cost of float32.
+        const QRhiTexture::Format fmt = asFloat ? QRhiTexture::RGBA16F : QRhiTexture::RGBA8;
         m_tex.reset(m_rhi->newTexture(fmt, pixelSize, 1, {}));
         if (!m_tex->create())
         {
-            cerr << "ERROR: present texture create failed (float=" << asFloat << ")" << endl;
+            cerr << "ERROR: present texture create failed (float16=" << asFloat << ")" << endl;
             m_tex.reset();
             m_texIsFloat = false;
             return;
@@ -548,7 +547,7 @@ namespace Rv
             if (!once)
             {
                 once = true;
-                cout << "INFO: present upload texture RGBA32F (float transfer for p3extended)" << endl;
+                cout << "INFO: present upload texture RGBA16F (half-float transfer for p3extended)" << endl;
             }
         }
     }
@@ -669,17 +668,17 @@ namespace Rv
                      << endl;
             }
         }
-        else if (m_hasPendingFloat && !m_pendingFloat.empty())
+        else if (m_hasPendingHalf && !m_pendingHalf.empty())
         {
-            // CPU float fallback (p3extended without interop).
-            const int srcW = m_pendingFloatW;
-            const int srcH = m_pendingFloatH;
+            // CPU half-float path (p3extended without interop): binary16 × 4 channels.
+            const int srcW = m_pendingHalfW;
+            const int srcH = m_pendingHalfH;
             texSize = QSize(srcW, srcH);
             ensureTexture(texSize, true);
             if (m_tex)
             {
-                QByteArray bytes(reinterpret_cast<const char*>(m_pendingFloat.data()),
-                                 qsizetype(m_pendingFloat.size() * sizeof(float)));
+                QByteArray bytes(reinterpret_cast<const char*>(m_pendingHalf.data()),
+                                 qsizetype(m_pendingHalf.size() * sizeof(uint16_t)));
                 QRhiTextureSubresourceUploadDescription sub(bytes);
                 sub.setSourceSize(texSize);
                 QRhiTextureUploadEntry entry(0, 0, sub);
@@ -688,7 +687,7 @@ namespace Rv
                 haveTex = true;
                 flipV = 1.f;
             }
-            m_hasPendingFloat = false;
+            m_hasPendingHalf = false;
         }
         else if (m_hasPending && !m_pending.isNull())
         {
@@ -955,10 +954,10 @@ namespace Rv
             m_window->setFrame(std::move(img));
     }
 
-    void VulkanPresentWidget::setFrameFloat(int width, int height, std::vector<float> rgba)
+    void VulkanPresentWidget::setFrameHalf(int width, int height, std::vector<uint16_t> rgba16)
     {
         if (m_window)
-            m_window->setFrameFloat(width, height, std::move(rgba));
+            m_window->setFrameHalf(width, height, std::move(rgba16));
     }
 
     void VulkanPresentWidget::setHdrPresent(bool enabled)
