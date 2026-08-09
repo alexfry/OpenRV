@@ -28,6 +28,9 @@
 #include <MuLang/StringType.h>
 
 #include <math.h>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #ifndef isnan
 #define isnan(x) ((x) != (x))
 #endif
@@ -35,6 +38,60 @@
 #ifdef TWK_USE_GLEW
 #include <GL/glew.h>
 #endif
+
+namespace
+{
+    // When the framebuffer is presented as HDR10/PQ (RV_HDR), HUD/timeline
+    // colors set via glColor are SDR-relative 0–1. If left unchanged they are
+    // interpreted as PQ codes and glow (e.g. cache green). Map them to PQ at
+    // ~SDR white nits so UI stays readable while image content can exceed it.
+    bool wantHdrDisplayColor()
+    {
+        const char* e = getenv("RV_HDR");
+        if (!e || !*e)
+            return false;
+        if (!strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off") || !strcmp(e, "no"))
+            return false;
+        return true;
+    }
+
+    float srgbToLinear(float u)
+    {
+        u = std::max(0.f, std::min(1.f, u));
+        return (u <= 0.04045f) ? (u / 12.92f) : powf((u + 0.055f) / 1.055f, 2.4f);
+    }
+
+    // ST.2084 PQ OETF; Y in nits [0, 10000] → code [0, 1]
+    float nitsToPQ(float nits)
+    {
+        nits = std::max(0.f, std::min(10000.f, nits));
+        const float m1 = 2610.f / 16384.f;
+        const float m2 = 2523.f / 32.f;
+        const float c1 = 3424.f / 4096.f;
+        const float c2 = 2413.f / 128.f;
+        const float c3 = 2392.f / 128.f;
+        const float y = nits / 10000.f;
+        const float ym = powf(y, m1);
+        return powf((c1 + c2 * ym) / (1.f + c3 * ym), m2);
+    }
+
+    void hdrEncodeDisplayColor(float& r, float& g, float& b)
+    {
+        if (!wantHdrDisplayColor())
+            return;
+        // Match typical Wayland HDR sdrWhiteLevel (~200 nits on this stack).
+        float sdrWhite = 200.f;
+        if (const char* e = getenv("RV_HDR_SDR_WHITE_NITS"))
+        {
+            const float v = strtof(e, nullptr);
+            if (v > 1.f && v < 10000.f)
+                sdrWhite = v;
+        }
+        r = nitsToPQ(srgbToLinear(r) * sdrWhite);
+        g = nitsToPQ(srgbToLinear(g) * sdrWhite);
+        b = nitsToPQ(srgbToLinear(b) * sdrWhite);
+    }
+} // namespace
 
 // AJG - CLASSIC
 #ifdef _MSC_VER
@@ -839,23 +896,34 @@ namespace Mu
         ::glClipPlane(NODE_ARG(0, int), clipPlane);
     }
 
-    NODE_IMPLEMENTATION(GLModule::glColor3f, void) { ::glColor3f(NODE_ARG(0, float), NODE_ARG(1, float), NODE_ARG(2, float)); }
+    NODE_IMPLEMENTATION(GLModule::glColor3f, void)
+    {
+        float r = NODE_ARG(0, float), g = NODE_ARG(1, float), b = NODE_ARG(2, float);
+        hdrEncodeDisplayColor(r, g, b);
+        ::glColor3f(r, g, b);
+    }
 
     NODE_IMPLEMENTATION(GLModule::glColor3fv, void)
     {
         const Vector3f& v = NODE_ARG(0, Vector3f);
-        ::glColor3f(v[0], v[1], v[2]);
+        float r = v[0], g = v[1], b = v[2];
+        hdrEncodeDisplayColor(r, g, b);
+        ::glColor3f(r, g, b);
     }
 
     NODE_IMPLEMENTATION(GLModule::glColor4f, void)
     {
-        ::glColor4f(NODE_ARG(0, float), NODE_ARG(1, float), NODE_ARG(2, float), NODE_ARG(3, float));
+        float r = NODE_ARG(0, float), g = NODE_ARG(1, float), b = NODE_ARG(2, float);
+        hdrEncodeDisplayColor(r, g, b);
+        ::glColor4f(r, g, b, NODE_ARG(3, float));
     }
 
     NODE_IMPLEMENTATION(GLModule::glColor4fv, void)
     {
         const Vector4f& v = NODE_ARG(0, Vector4f);
-        ::glColor4f(v[0], v[1], v[2], v[3]);
+        float r = v[0], g = v[1], b = v[2];
+        hdrEncodeDisplayColor(r, g, b);
+        ::glColor4f(r, g, b, v[3]);
     }
 
     NODE_IMPLEMENTATION(GLModule::glColorMask, void)

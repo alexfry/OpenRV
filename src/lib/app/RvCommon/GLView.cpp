@@ -371,17 +371,26 @@ namespace Rv
         //  illegal to set to that value so test for positive red, not
         //  just non-zero red.  If any of these values is < 0, we ignore it.
         //
-        // HDR image plane only: request Bt2100Pq on *this* QOpenGLWidget's
-        // format (not QSurfaceFormat::setDefaultFormat — that PQ-tags the
-        // whole app UI). DisplayIPNode encodes linear→PQ into the image FBO.
-        // Whether Qt/Wayland promotes that to a separate CM subsurface vs the
-        // parent sRGB window is compositor/Qt-version dependent.
+        // HDR: do NOT tag the QOpenGLWidget surface as Bt2100Pq when we blit
+        // via the external Vulkan present path. The GL FBO is only a transfer
+        // buffer of raw PQ codes (UNORM); HDR10 color management belongs on the
+        // Vulkan swapchain. Tagging the GL widget confuses Qt/EGL and can make
+        // the image look like muted SDR while HUD greens look "HDR".
         //
+        // Optional legacy: RV_HDR_GL_SURFACE=1 still requests Bt2100Pq on GL.
         // Do not force 10/16 bpc: NVIDIA Wayland EGL often has no matching
         // config (QEGLPlatformContext 3009).
         if (hdr)
         {
-            fmt.setColorSpace(QColorSpace(QColorSpace::Bt2100Pq));
+            const char* glSurf = getenv("RV_HDR_GL_SURFACE");
+            const bool tagGl = glSurf && *glSurf && strcmp(glSurf, "0") && strcmp(glSurf, "false")
+                               && strcmp(glSurf, "off") && strcmp(glSurf, "no");
+            // Only tag GL when not using Vulkan present (CPU/off paths).
+            const bool vulkanPresent = preferVulkanPresent() && wantExternalPresent();
+            if (tagGl || !vulkanPresent)
+            {
+                fmt.setColorSpace(QColorSpace(QColorSpace::Bt2100Pq));
+            }
         }
 
         if (red > 0)
@@ -432,6 +441,11 @@ namespace Rv
         {
             initializeGLExtensions();
             initializeOpenGLFunctions();
+
+            // Keep PQ codes linear in the UNORM FBO (no sRGB encode on write).
+#ifdef GL_FRAMEBUFFER_SRGB
+            glDisable(GL_FRAMEBUFFER_SRGB);
+#endif
 
             if (m_sharedContext)
             {
@@ -709,6 +723,10 @@ namespace Rv
             m_videoDevice->setAbsolutePosition(x, y);
 
             TWK_GLDEBUG;
+#ifdef GL_FRAMEBUFFER_SRGB
+            // Re-assert each frame: some paths re-enable sRGB.
+            glDisable(GL_FRAMEBUFFER_SRGB);
+#endif
             session->render();
             TWK_GLDEBUG;
 
@@ -722,7 +740,7 @@ namespace Rv
             TWK_GLDEBUG;
 
             // FBO probe (RV_GL_PROBE=1): log first 5 paints + every 30th after.
-            // Distinguishes "render wrote black" vs "compositor hides pixels".
+            // Also samples L/C/R of the image (for PQ: ~0.51/0.75/0.64 @ 100/1000/400 nits).
             if (getenv("RV_GL_PROBE") && *getenv("RV_GL_PROBE") != '0')
             {
                 static int probeCount = 0;
@@ -730,14 +748,22 @@ namespace Rv
                 {
                     GLint vp[4] = {0, 0, 0, 0};
                     glGetIntegerv(GL_VIEWPORT, vp);
-                    const int px = vp[0] + std::max(0, vp[2] / 2);
-                    const int py = vp[1] + std::max(0, vp[3] / 2);
-                    unsigned char rgba[4] = {0, 0, 0, 0};
-                    glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+                    auto sample = [&](float fx, float fy) {
+                        unsigned char rgba[4] = {0, 0, 0, 0};
+                        const int px = vp[0] + int(std::max(0.f, std::min(float(vp[2] - 1), fx * vp[2])));
+                        const int py = vp[1] + int(std::max(0.f, std::min(float(vp[3] - 1), fy * vp[3])));
+                        glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+                        return rgba[0]; // grayscale wedge
+                    };
+                    // Image roughly in vertical center; L/C/R horizontally.
+                    const int L = sample(0.20f, 0.50f);
+                    const int C = sample(0.50f, 0.50f);
+                    const int R = sample(0.80f, 0.50f);
                     cout << "INFO: RV_GL_PROBE n=" << probeCount << " fbo=" << postFbo
                          << " vp=" << vp[2] << "x" << vp[3]
-                         << " rgba=" << int(rgba[0]) << "," << int(rgba[1]) << "," << int(rgba[2])
-                         << "," << int(rgba[3]) << " dpr=" << devicePixelRatio()
+                         << " LCR8=" << L << "," << C << "," << R
+                         << " (PQ100≈130 PQ400≈164 PQ1000≈192 if HDR encode)"
+                         << " dpr=" << devicePixelRatio()
                          << " widget=" << width() << "x" << height() << endl;
                 }
                 ++probeCount;

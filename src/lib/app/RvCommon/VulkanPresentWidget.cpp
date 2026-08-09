@@ -362,9 +362,8 @@ namespace Rv
         if (m_hasPending && !m_pending.isNull())
         {
             // GL FBO (grab) and the embedded QWindow swapchain can disagree on
-            // fractional DPR (e.g. FBO @2.0 vs window @1.25). Always fit the
-            // full grab into the swapchain with correct aspect (letterbox), not
-            // a stretched IgnoreAspectRatio scale that warps the image.
+            // fractional DPR (e.g. FBO @2.0 vs window @1.25). Fit the full grab
+            // into the swapchain (letterbox if needed).
             QImage img = m_pending;
             if (outputSize.isValid() && img.size() != outputSize)
             {
@@ -381,6 +380,33 @@ namespace Rv
                     img = std::move(canvas);
                 }
             }
+
+            // Optional synthetic PQ wedges to validate the HDR10 surface itself
+            // (bypass GL). Left≈100 nits, center≈1000, right≈400.
+            if (getenv("RV_HDR_TEST_PATTERN") && *getenv("RV_HDR_TEST_PATTERN") != '0' && m_hdr)
+            {
+                img = QImage(outputSize, QImage::Format_RGBA8888);
+                // PQ codes for 100 / 1000 / 400 nits (approx 8-bit)
+                const int pq100 = 130, pq400 = 164, pq1000 = 192;
+                for (int y = 0; y < img.height(); ++y)
+                {
+                    uchar* row = img.scanLine(y);
+                    for (int x = 0; x < img.width(); ++x)
+                    {
+                        const float fx = float(x) / float(std::max(1, img.width() - 1));
+                        int v = pq100;
+                        if (fx > 0.66f)
+                            v = pq400;
+                        else if (fx > 0.33f)
+                            v = pq1000;
+                        row[x * 4 + 0] = uchar(v);
+                        row[x * 4 + 1] = uchar(v);
+                        row[x * 4 + 2] = uchar(v);
+                        row[x * 4 + 3] = 255;
+                    }
+                }
+            }
+
             ensureTexture(img.size());
             if (m_tex)
                 u->uploadTexture(m_tex.get(), img);
@@ -389,10 +415,17 @@ namespace Rv
             static int s_log = 0;
             if (s_log++ < 5)
             {
+                // Sample present tex L/C/R before upload
+                auto samp = [&](float fx) {
+                    const int x = int(fx * (img.width() - 1));
+                    const int y = img.height() / 2;
+                    return int(img.pixelColor(x, y).red());
+                };
                 cout << "INFO: present upload src=" << m_pending.width() << "x" << m_pending.height()
                      << " -> tex=" << img.width() << "x" << img.height() << " swap=" << outputSize.width() << "x"
                      << outputSize.height() << " win=" << width() << "x" << height() << "@" << devicePixelRatio()
-                     << endl;
+                     << " LCR8=" << samp(0.2f) << "," << samp(0.5f) << "," << samp(0.8f)
+                     << " scFmt=" << m_swapchainFormat << endl;
             }
         }
         ensurePipeline();

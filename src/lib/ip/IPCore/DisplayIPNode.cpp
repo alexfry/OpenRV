@@ -288,7 +288,10 @@ namespace IPCore
         // *codes*. Absolute panel nits still require the image surface to be
         // color-managed as PQ (GLView format Bt2100Pq; do not setDefaultFormat).
         // This does *not* use color.brightness / -brightness (stops).
-        if (wantHdrDisplay() && overrideColorspace.empty())
+        // Force PQ for the image display path when RV_HDR=1. Do not require
+        // overrideColorspace to be empty — prefs may set sRGB and would silently
+        // keep the path in SDR while the present surface is HDR10.
+        if (wantHdrDisplay())
         {
             overrideColorspace = TwkFB::ColorSpace::SMPTE2084();
             linear2sRGB = false;
@@ -302,8 +305,8 @@ namespace IPCore
                 once = true;
                 cerr << "INFO: RV_HDR=1 — image display SMPTE-2084 PQ "
                         "(linear nits/100: 1.0→100 nits, 4.0→400, 10.0→1000). "
-                        "UI stays on default window colorspace; "
-                        "RV_HDR_SURFACE=1 tags whole window as PQ (breaks chrome)."
+                        "Present path should use HDR10 swapchain. "
+                        "UI HUD drawn into the same FBO is not image-referred."
                      << endl;
             }
         }
