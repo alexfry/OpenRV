@@ -120,6 +120,7 @@ namespace Rv
                                           QRhiRenderBuffer::UsedWithSwapChainOnly));
         m_sc->setWindow(this);
         m_sc->setDepthStencil(m_ds.get());
+        selectSwapChainFormat();
         m_rp.reset(m_sc->newCompatibleRenderPassDescriptor());
         m_sc->setRenderPassDescriptor(m_rp.get());
 
@@ -134,6 +135,54 @@ namespace Rv
         // Uniform buffer for clipSpaceCorrMatrix
         m_ubuf.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 64));
         m_ubuf->create();
+    }
+
+    void VulkanPresentWindow::selectSwapChainFormat()
+    {
+        if (!m_sc)
+            return;
+
+        // Default SDR.
+        QRhiSwapChain::Format fmt = QRhiSwapChain::SDR;
+        const char* name = "SDR";
+
+        if (m_hdr)
+        {
+            // Prefer HDR10 (PQ / ST.2084) — matches DisplayIPNode SMPTE-2084 encode
+            // and mpv's VK_COLOR_SPACE_HDR10_ST2084_EXT path on this machine.
+            if (m_sc->isFormatSupported(QRhiSwapChain::HDR10))
+            {
+                fmt = QRhiSwapChain::HDR10;
+                name = "HDR10 (PQ/ST.2084)";
+            }
+            else if (m_sc->isFormatSupported(QRhiSwapChain::HDRExtendedSrgbLinear))
+            {
+                fmt = QRhiSwapChain::HDRExtendedSrgbLinear;
+                name = "HDRExtendedSrgbLinear";
+                cout << "WARNING: HDR10 unsupported; using scRGB linear. "
+                        "PQ-encoded FBOs will look wrong until encode matches."
+                     << endl;
+            }
+            else if (m_sc->isFormatSupported(QRhiSwapChain::HDRExtendedDisplayP3Linear))
+            {
+                fmt = QRhiSwapChain::HDRExtendedDisplayP3Linear;
+                name = "HDRExtendedDisplayP3Linear";
+                cout << "WARNING: HDR10 unsupported; using P3 linear." << endl;
+            }
+            else
+            {
+                cout << "WARNING: no HDR swapchain format supported — presenting as SDR "
+                        "(highlights will not be absolute nits)"
+                     << endl;
+            }
+        }
+
+        m_sc->setFormat(fmt);
+        if (int(fmt) != m_swapchainFormat)
+        {
+            m_swapchainFormat = int(fmt);
+            cout << "INFO: VulkanPresentWindow swapchain format=" << name << endl;
+        }
     }
 
     void VulkanPresentWindow::releaseRhi()
@@ -167,12 +216,32 @@ namespace Rv
             return false;
         if (size().isEmpty())
             return false;
+
+        // Re-apply HDR format each recreate (createOrResize can reset state).
+        selectSwapChainFormat();
+
         // QRhi derives pixel size from the QWindow (logical size × dpr).
         if (!m_sc->createOrResize())
         {
             cerr << "ERROR: swapchain createOrResize failed" << endl;
             return false;
         }
+
+        static bool loggedHdrInfo = false;
+        if (m_hdr && !loggedHdrInfo)
+        {
+            loggedHdrInfo = true;
+            const QRhiSwapChainHdrInfo hi = m_sc->hdrInfo();
+            cout << "INFO: swapchain HDR info: limitsType=" << int(hi.limitsType)
+                 << " sdrWhiteLevel=" << hi.sdrWhiteLevel;
+            if (hi.limitsType == QRhiSwapChainHdrInfo::LuminanceInNits)
+            {
+                cout << " minNits=" << hi.limits.luminanceInNits.minLuminance
+                     << " maxNits=" << hi.limits.luminanceInNits.maxLuminance;
+            }
+            cout << " formatEnum=" << int(m_sc->format()) << endl;
+        }
+
         m_pipeline.reset();
         m_pipelineBuilt = false;
         return true;

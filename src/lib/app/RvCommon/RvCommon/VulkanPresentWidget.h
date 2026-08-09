@@ -50,11 +50,13 @@ namespace Rv
         void ensurePipeline();
         void renderFrame();
         bool ensureSwapChain();
+        void selectSwapChainFormat();
 
         QImage m_pending;
         bool m_hasPending = false;
         bool m_hdr = false;
         bool m_running = false;
+        int m_swapchainFormat = 0; // QRhiSwapChain::Format as int
 
         QVulkanInstance* m_inst = nullptr;
         QRhi* m_rhi = nullptr;
