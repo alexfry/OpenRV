@@ -525,8 +525,10 @@ namespace Rv
         if (m_tex && m_texSize == pixelSize && m_texIsFloat == asFloat)
             return;
         m_tex.reset();
-        // Interop shared image is RGBA16F for float; match so vkCmdCopyImage is valid.
-        const QRhiTexture::Format fmt = asFloat ? QRhiTexture::RGBA16F : QRhiTexture::RGBA8;
+        // CPU float path uploads full float32 pixels (glReadPixels GL_FLOAT) — must be
+        // RGBA32F. RGBA16F reinterprets those bits as half-floats → green static noise.
+        // (Interop uses its own sample texture; it does not go through this upload path.)
+        const QRhiTexture::Format fmt = asFloat ? QRhiTexture::RGBA32F : QRhiTexture::RGBA8;
         m_tex.reset(m_rhi->newTexture(fmt, pixelSize, 1, {}));
         if (!m_tex->create())
         {
@@ -546,7 +548,7 @@ namespace Rv
             if (!once)
             {
                 once = true;
-                cout << "INFO: present sample texture RGBA16F (float transfer / interop copy target)" << endl;
+                cout << "INFO: present upload texture RGBA32F (float transfer for p3extended)" << endl;
             }
         }
     }
