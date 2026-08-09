@@ -167,6 +167,9 @@ namespace Rv
         DiagnosticsView* m_diagnosticsView;
         QDockWidget* m_diagnosticsDock;
         GLView* m_glView;
+        // Wayland: QRhi/Vulkan present surface (sibling of GLView, created first
+        // so the top-level window uses Vulkan composition).
+        class VulkanPresentWidget* m_vulkanPresent = nullptr;
         GLView* m_oldGLView;
         QWidget* m_viewContainerWidget;
         RvTopViewToolBar* m_topViewToolBar;

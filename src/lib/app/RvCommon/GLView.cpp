@@ -14,6 +14,7 @@
 
 #include <RvCommon/GLView.h>
 #include <RvCommon/QTGLVideoDevice.h>
+#include <RvCommon/VulkanPresentWidget.h>
 #include <TwkGLF/GLFence.h>
 #include <RvCommon/InitGL.h>
 #include <RvCommon/RvDocument.h>
@@ -25,6 +26,17 @@
 #include <boost/thread/condition_variable.hpp>
 
 #include <QtWidgets/QMenu>
+#include <QColorSpace>
+#include <QGuiApplication>
+#include <QWindow>
+#include <QPalette>
+#include <QPainter>
+#include <QResizeEvent>
+#include <QMoveEvent>
+#include <QTimer>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 
 namespace Rv
 {
@@ -35,6 +47,97 @@ namespace Rv
 
     namespace
     {
+        // Goal 2: on-screen HDR / extended-range. Activated by RV_HDR=1 (or
+        // true/yes/on). Prefer native Wayland so Qt can use
+        // wp_color_management_v1; XWayland still clamps most clients as SDR.
+        bool wantHdrDisplay()
+        {
+            const char* e = getenv("RV_HDR");
+            if (!e || !*e)
+                return false;
+            if (!strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off") || !strcmp(e, "no"))
+                return false;
+            return true;
+        }
+
+        bool envFlagOn(const char* name)
+        {
+            const char* e = getenv(name);
+            if (!e || !*e)
+                return false;
+            if (!strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off") || !strcmp(e, "no"))
+                return false;
+            return true;
+        }
+
+        bool envFlagOff(const char* name)
+        {
+            const char* e = getenv(name);
+            if (!e || !*e)
+                return false;
+            return !strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off") || !strcmp(e, "no");
+        }
+
+        // Qt OpenGL → Wayland present is broken on this NVIDIA/Hyprland stack.
+        // Prefer Vulkan QRhi present (HDR-capable path). Fall back to CPU QWidget
+        // if RV_WAYLAND_CPU_PRESENT=1 or RV_VULKAN_PRESENT=0.
+        bool wantExternalPresent()
+        {
+            if (envFlagOff("RV_WAYLAND_PRESENT"))
+                return false;
+            if (envFlagOn("RV_WAYLAND_PRESENT"))
+                return true;
+            return QGuiApplication::platformName().startsWith(QLatin1String("wayland"));
+        }
+
+        bool preferVulkanPresent()
+        {
+            if (envFlagOff("RV_VULKAN_PRESENT"))
+                return false;
+            if (envFlagOn("RV_VULKAN_PRESENT"))
+                return true;
+            // Default on for Wayland; CPU only if explicitly forced.
+            if (envFlagOn("RV_WAYLAND_CPU_PRESENT"))
+                return false;
+            return true;
+        }
+
+        // Paints a full-widget QImage (from grabFramebuffer). Mouse events pass
+        // through so GLView keeps input. SDR-only emergency fallback.
+        class PresentOverlay : public QWidget
+        {
+        public:
+            explicit PresentOverlay(QWidget* parent)
+                : QWidget(parent)
+            {
+                setAttribute(Qt::WA_TransparentForMouseEvents, true);
+                setAttribute(Qt::WA_OpaquePaintEvent, true);
+                setAttribute(Qt::WA_NoSystemBackground, true);
+                setAutoFillBackground(false);
+            }
+
+            void setFrame(QImage img)
+            {
+                m_img = std::move(img);
+                update();
+            }
+
+        protected:
+            void paintEvent(QPaintEvent*) override
+            {
+                QPainter p(this);
+                p.setCompositionMode(QPainter::CompositionMode_Source);
+                if (m_img.isNull())
+                {
+                    p.fillRect(rect(), Qt::black);
+                    return;
+                }
+                p.drawImage(rect(), m_img);
+            }
+
+        private:
+            QImage m_img;
+        };
 
         class SyncBufferThreadData
         {
@@ -138,12 +241,46 @@ namespace Rv
         , m_postFirstNonEmptyRender(noResize)
         , m_stopProcessingEvents(false)
         , m_syncThreadData(0)
+        , m_presentOverlay(nullptr)
     {
         setFormat(rvGLFormat(stereo, vsync, doubleBuffer, red, green, blue, alpha));
+
+        // Wayland composites QOpenGLWidget FBOs with alpha. If RGB draws leave
+        // alpha at 0, the image plane is fully transparent and the *desktop*
+        // shows through — reads as an "empty" viewer. Mark the widget opaque.
+        // Do NOT setPalette()/setAutoFillBackground() here: those emit events
+        // during construction before m_videoDevice exists → QTTranslator SIGSEGV.
+        setAttribute(Qt::WA_OpaquePaintEvent, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+
+        if (wantHdrDisplay())
+        {
+            const QSurfaceFormat requested = format();
+            cout << "INFO: HDR display mode (RV_HDR): colorSpace tf="
+                 << int(requested.colorSpace().transferFunction())
+                 << " rgb bits=" << requested.redBufferSize() << "/" << requested.greenBufferSize()
+                 << "/" << requested.blueBufferSize()
+                 << " platform=" << QGuiApplication::platformName().toStdString() << endl;
+        }
 
         ostringstream str;
         str << UI_APPLICATION_NAME " Main Window" << "/" << m_doc;
         m_videoDevice = new QTGLVideoDevice(0, str.str(), this);
+
+        // External present is normally attached via setExternalPresentWidget()
+        // after construction (Vulkan surface must be created *before* this
+        // QOpenGLWidget so the top-level window uses Vulkan composition).
+        // CPU fallback can still be created here if forced.
+        if (wantExternalPresent() && !preferVulkanPresent())
+        {
+            m_presentOverlay = new PresentOverlay(this);
+            cout << "INFO: Wayland CPU present fallback (SDR only). "
+                    "Set RV_VULKAN_PRESENT=1 for Vulkan/HDR path."
+                 << endl;
+            syncPresentOverlayGeometry();
+            m_presentOverlay->show();
+            m_presentOverlay->raise();
+        }
 
         setObjectName((m_doc->session()) ? m_doc->session()->name().c_str() : "no session");
 
@@ -173,6 +310,23 @@ namespace Rv
 
     void GLView::stopProcessingEvents() { m_stopProcessingEvents = true; }
 
+    void GLView::setExternalPresentWidget(QWidget* present)
+    {
+        if (!present)
+            return;
+        m_presentOverlay = present;
+        if (auto* vk = qobject_cast<VulkanPresentWidget*>(present))
+        {
+            vk->setHdrPresent(wantHdrDisplay());
+            cout << "INFO: Wayland Vulkan present attached (QRhi/Vulkan; GL FBO → texture). "
+                    "HDR request="
+                 << (wantHdrDisplay() ? "yes" : "no") << endl;
+        }
+        syncPresentOverlayGeometry();
+        m_presentOverlay->show();
+        m_presentOverlay->raise();
+    }
+
     QSize GLView::sizeHint() const { return m_csize; }
 
     QSize GLView::minimumSizeHint() const { return m_msize; }
@@ -192,6 +346,7 @@ namespace Rv
     QSurfaceFormat GLView::rvGLFormat(bool stereo, bool vsync, bool doubleBuffer, int red, int green, int blue, int alpha)
     {
         const Rv::Options& opts = Rv::Options::sharedOptions();
+        const bool hdr = wantHdrDisplay();
 
         // NOTE_QT6: QGLFormat into QSurfaceFormat
         // NOTE_QT6: setStencil, setDepth does not exist anymore. Trying to use
@@ -216,6 +371,19 @@ namespace Rv
         //  illegal to set to that value so test for positive red, not
         //  just non-zero red.  If any of these values is < 0, we ignore it.
         //
+        // HDR image plane only: request Bt2100Pq on *this* QOpenGLWidget's
+        // format (not QSurfaceFormat::setDefaultFormat — that PQ-tags the
+        // whole app UI). DisplayIPNode encodes linear→PQ into the image FBO.
+        // Whether Qt/Wayland promotes that to a separate CM subsurface vs the
+        // parent sRGB window is compositor/Qt-version dependent.
+        //
+        // Do not force 10/16 bpc: NVIDIA Wayland EGL often has no matching
+        // config (QEGLPlatformContext 3009).
+        if (hdr)
+        {
+            fmt.setColorSpace(QColorSpace(QColorSpace::Bt2100Pq));
+        }
+
         if (red > 0)
             fmt.setRedBufferSize(red);
         if (green > 0)
@@ -225,6 +393,20 @@ namespace Rv
         if (alpha >= 0)
         {
             fmt.setAlphaBufferSize(alpha);
+        }
+
+        // Wayland composites QOpenGLWidget FBOs with alpha. We need an alpha
+        // *plane* so paintGL can force A=1 after render; alphaBufferSize=0
+        // leaves Qt/RHI with a translucent texture (desktop shows through).
+        // Prefer 8-bit alpha on Wayland even if prefs say 0.
+        if (QGuiApplication::platformName().startsWith(QLatin1String("wayland")))
+        {
+            if (fmt.alphaBufferSize() <= 0)
+                fmt.setAlphaBufferSize(8);
+        }
+        else if (alpha == 0)
+        {
+            fmt.setAlphaBufferSize(0);
         }
 
         fmt.setSwapInterval(vsync ? 1 : 0);
@@ -263,6 +445,17 @@ namespace Rv
 
             // NOTE_QT6: QGLFormat is deprecated. Using QSurfaceFormat now.
             QSurfaceFormat f = context()->format();
+            // Always log alpha on Wayland — A=0 FBO + compositor = desktop bleed.
+            if (wantHdrDisplay()
+                || QGuiApplication::platformName().startsWith(QLatin1String("wayland")))
+            {
+                cout << "INFO: GL context format: rgb bits=" << f.redBufferSize() << "/"
+                     << f.greenBufferSize() << "/" << f.blueBufferSize()
+                     << " alpha=" << f.alphaBufferSize()
+                     << " colorSpace primaries=" << int(f.colorSpace().primaries())
+                     << " tf=" << int(f.colorSpace().transferFunction())
+                     << " platform=" << QGuiApplication::platformName().toStdString() << endl;
+            }
 
 #ifndef PLATFORM_DARWIN
             //
@@ -354,6 +547,87 @@ namespace Rv
         // image.save("/home/<username>>/<orv_folder>/fbo.png");
     }
 
+    void GLView::resizeEvent(QResizeEvent* event)
+    {
+        QOpenGLWidget::resizeEvent(event);
+        syncPresentOverlayGeometry();
+    }
+
+    void GLView::moveEvent(QMoveEvent* event)
+    {
+        QOpenGLWidget::moveEvent(event);
+        syncPresentOverlayGeometry();
+    }
+
+    void GLView::syncPresentOverlayGeometry()
+    {
+        if (!m_presentOverlay)
+            return;
+
+        // Stacked sibling (Vulkan container) or child (CPU overlay): fill our
+        // area in the shared parent, or our own rect if we own it.
+        if (m_presentOverlay->parentWidget() == this)
+        {
+            m_presentOverlay->setGeometry(rect());
+        }
+        else if (m_presentOverlay->parentWidget() == parentWidget())
+        {
+            m_presentOverlay->setGeometry(QRect(pos(), size()));
+        }
+        else if (m_presentOverlay->parentWidget())
+        {
+            const QPoint topLeft = mapTo(m_presentOverlay->parentWidget(), QPoint(0, 0));
+            m_presentOverlay->setGeometry(QRect(topLeft, size()));
+        }
+        m_presentOverlay->raise();
+        if (!m_presentOverlay->isVisible())
+            m_presentOverlay->show();
+    }
+
+    void GLView::updateCpuPresentFallback()
+    {
+        if (!m_presentOverlay)
+            return;
+
+        // Avoid re-entrant paintGL if the overlay update schedules a parent repaint.
+        static bool s_inPresent = false;
+        if (s_inPresent)
+            return;
+        s_inPresent = true;
+
+        // Must be called with the widget FBO current (end of paintGL).
+        // Returns top-left-origin device pixels (Qt already flips GL bottom-up).
+        QImage img = grabFramebuffer();
+        if (img.isNull())
+        {
+            s_inPresent = false;
+            return;
+        }
+        // Pixel buffer is already device-resolution; clear DPR so present path
+        // does not interpret the image as "logical size × dpr" a second time.
+        img.setDevicePixelRatio(1.0);
+
+        syncPresentOverlayGeometry();
+        if (!m_presentOverlay->isVisible())
+            m_presentOverlay->show();
+
+        // Defer setFrame/update to after paintGL returns so we do not recurse
+        // into QOpenGLWidget paint via the child widget's update().
+        if (auto* vk = qobject_cast<VulkanPresentWidget*>(m_presentOverlay))
+        {
+            QTimer::singleShot(0, vk, [vk, img = std::move(img)]() mutable { vk->setFrame(std::move(img)); });
+        }
+        else if (auto* overlay = dynamic_cast<PresentOverlay*>(m_presentOverlay))
+        {
+            // QPainter drawImage(rect, img) with dpr=1 + logical rect is correct.
+            QTimer::singleShot(0, overlay, [overlay, img = std::move(img)]() mutable {
+                overlay->setFrame(std::move(img));
+            });
+        }
+
+        s_inPresent = false;
+    }
+
     void GLView::paintGL()
     {
         TWK_GLDEBUG;
@@ -394,6 +668,21 @@ namespace Rv
 #endif
 #endif
 
+        // Always bind the widget FBO and start from opaque black. On Wayland,
+        // a zero alpha channel makes the plane show the desktop (not "empty
+        // black") after Qt composites the QOpenGLWidget texture.
+        GLuint widgetFbo = defaultFramebufferObject();
+        if (QOpenGLContext::currentContext())
+            widgetFbo = QOpenGLContext::currentContext()->defaultFramebufferObject();
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, widgetFbo);
+        TWK_GLDEBUG;
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        TWK_GLDEBUG;
+        glClearColor(0.f, 0.f, 0.f, 1.0f);
+        TWK_GLDEBUG;
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        TWK_GLDEBUG;
+
         if (m_doc && session && m_videoDevice)
         {
             // m_frameBuffer->makeCurrent();
@@ -425,21 +714,34 @@ namespace Rv
 
             m_firstPaintCompleted = true;
 
-            // Starting with Qt 5.12.1, the resulting texture is later
-            // composited over white which creates undesirable artifacts. As a
-            // work around, we set the resulting alpha channel to 1 to make sure
-            // that the resulting texture is fully opaque.
-
-            // NOTE_QT: That code seems to fix an issue on MacOS only. (Not on
-            // Linux, not test on Windows)
-            //          The issue I see on MacOS that the background is brown
-            //          istead of black with the default background.
-            //
-            // Even on Qt6/QOpenGLWidget, we need to call
-            // glBindFramebuffer(); it otherwise complains and fails
-            // on glClear() on macOS
-            glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, QOpenGLContext::currentContext()->defaultFramebufferObject());
+            // Force alpha = 1 so Wayland/Qt does not composite the image plane
+            // as transparent over the desktop. (Same intent as the Qt 5.12.1
+            // opaque-texture workaround on macOS.)
+            const GLuint postFbo = QOpenGLContext::currentContext()->defaultFramebufferObject();
+            glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, postFbo);
             TWK_GLDEBUG;
+
+            // FBO probe (RV_GL_PROBE=1): log first 5 paints + every 30th after.
+            // Distinguishes "render wrote black" vs "compositor hides pixels".
+            if (getenv("RV_GL_PROBE") && *getenv("RV_GL_PROBE") != '0')
+            {
+                static int probeCount = 0;
+                if (probeCount < 5 || (probeCount % 30) == 0)
+                {
+                    GLint vp[4] = {0, 0, 0, 0};
+                    glGetIntegerv(GL_VIEWPORT, vp);
+                    const int px = vp[0] + std::max(0, vp[2] / 2);
+                    const int py = vp[1] + std::max(0, vp[3] / 2);
+                    unsigned char rgba[4] = {0, 0, 0, 0};
+                    glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+                    cout << "INFO: RV_GL_PROBE n=" << probeCount << " fbo=" << postFbo
+                         << " vp=" << vp[2] << "x" << vp[3]
+                         << " rgba=" << int(rgba[0]) << "," << int(rgba[1]) << "," << int(rgba[2])
+                         << "," << int(rgba[3]) << " dpr=" << devicePixelRatio()
+                         << " widget=" << width() << "x" << height() << endl;
+                }
+                ++probeCount;
+            }
 
             glPushAttrib(GL_COLOR_BUFFER_BIT);
             TWK_GLDEBUG;
@@ -447,17 +749,16 @@ namespace Rv
             TWK_GLDEBUG;
             glClearColor(0.f, 0.f, 0.f, 1.0f);
             TWK_GLDEBUG;
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glClear(GL_COLOR_BUFFER_BIT);
+            TWK_GLDEBUG;
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
             TWK_GLDEBUG;
             glPopAttrib();
             TWK_GLDEBUG;
-        }
-        else
-        {
-            glClearColor(0.f, 0.f, 0.f, 1.0f);
-            TWK_GLDEBUG;
-            glClear(GL_COLOR_BUFFER_BIT);
-            TWK_GLDEBUG;
+
+            // Wayland: Qt may never composite this FBO into the window. Blit to
+            // a QWidget child that *does* present (verified with plain QWidget).
+            updateCpuPresentFallback();
         }
 
         if (m_stopProcessingEvents)
@@ -829,6 +1130,13 @@ namespace Rv
         return false;
     }
 
-    float GLView::devicePixelRatio() const { return videoDevice() ? videoDevice()->devicePixelRatio() : 1.0f; }
+    float GLView::devicePixelRatio() const
+    {
+        // Prefer the real QWidget/OpenGL FBO scale (fractional-scale safe).
+        const qreal widgetDpr = QWidget::devicePixelRatioF();
+        if (widgetDpr > 0.0)
+            return float(widgetDpr);
+        return videoDevice() ? videoDevice()->devicePixelRatio() : 1.0f;
+    }
 
 } // namespace Rv

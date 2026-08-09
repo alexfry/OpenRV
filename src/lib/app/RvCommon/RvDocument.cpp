@@ -24,6 +24,9 @@
 #include <GL/glew.h>
 #endif
 #include <RvCommon/GLView.h> // WINDOWS: include AFTER other stuff
+#include <RvCommon/VulkanPresentWidget.h>
+#include <QGuiApplication>
+#include <QCoreApplication>
 #include <RvCommon/DiagnosticsView.h>
 #include <RvCommon/QTGLVideoDevice.h>
 #include <QtGui/QtGui>
@@ -219,6 +222,34 @@ namespace Rv
         m_stackedLayout = new QStackedLayout(m_centralWidget);
         m_stackedLayout->setStackingMode(QStackedLayout::StackAll);
         m_stackedLayout->addWidget(m_glView);
+
+        // Wayland: embed a Vulkan subsurface over the GL view via
+        // createWindowContainer. Separate QWindow (own graphics API) but the
+        // same top-level client — Hyprland tiles one RV window, not two.
+        {
+            const bool onWayland =
+                QGuiApplication::platformName().startsWith(QLatin1String("wayland"));
+            const char* forceVk = getenv("RV_VULKAN_PRESENT");
+            const bool wantVk =
+                forceVk ? (strcmp(forceVk, "0") && strcmp(forceVk, "false") && strcmp(forceVk, "off"))
+                        : onWayland;
+            const char* forceCpu = getenv("RV_WAYLAND_CPU_PRESENT");
+            const bool cpuOnly = forceCpu && strcmp(forceCpu, "0") && strcmp(forceCpu, "false")
+                                 && strcmp(forceCpu, "off");
+            if (wantVk && !cpuOnly)
+            {
+                m_vulkanPresent = new VulkanPresentWidget(m_centralWidget);
+                const char* hdr = getenv("RV_HDR");
+                const bool hdrOn = hdr && *hdr && strcmp(hdr, "0") && strcmp(hdr, "false")
+                                   && strcmp(hdr, "off") && strcmp(hdr, "no");
+                m_vulkanPresent->setHdrPresent(hdrOn);
+                // Stack on top of GLView (StackAll: later widgets paint above).
+                m_stackedLayout->addWidget(m_vulkanPresent);
+                m_glView->setExternalPresentWidget(m_vulkanPresent);
+                cout << "INFO: Embedded Vulkan present (createWindowContainer subsurface). HDR="
+                     << (hdrOn ? "on" : "off") << endl;
+            }
+        }
 
         setCentralWidget(m_viewContainerWidget);
 

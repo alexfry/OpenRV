@@ -97,6 +97,10 @@
 
 #if defined(RV_VFX_CY2023)
 #include <QTextCodec>
+#include <QSurfaceFormat>
+#include <QColorSpace>
+#include <cstdlib>
+#include <cstring>
 #endif
 #include <QtWidgets/QtWidgets>
 #include <QtGui/QtGui>
@@ -353,10 +357,46 @@ int utf8Main(int argc, char* argv[])
 
     TwkFB::ThreadPool::initialize();
 
-    // Qt 5.12.1 specific
-    // Disable Qt Quick hardware rendering because QwebEngineView conflicts with
-    // QGLWidget
-    setEnvVar("QT_QUICK_BACKEND", "software");
+    // Qt composites QOpenGLWidget FBOs via the widgets RHI backend. On native
+    // Wayland, a software/non-GL RHI path leaves the image plane black even
+    // when the FBO is correctly white (verified with RV_GL_PROBE). Prefer GL
+    // interop for the widget stack on Wayland; keep the historical Quick
+    // software backend on other platforms (QWebEngine vs QGLWidget).
+    {
+        const char* qpa = getenv("QT_QPA_PLATFORM");
+        const bool wayland =
+            (qpa && (strstr(qpa, "wayland") == qpa || strstr(qpa, "wayland;") != nullptr))
+            || (getenv("WAYLAND_DISPLAY") && (!qpa || !*qpa || strstr(qpa, "wayland")));
+        // Prefer explicit RV_QT_PLATFORM / forced platform from the wrapper.
+        const char* rvPlat = getenv("RV_QT_PLATFORM");
+        const bool forceWayland = rvPlat && !strcmp(rvPlat, "wayland");
+        const bool forceXcb = rvPlat && !strcmp(rvPlat, "xcb");
+        const bool useWaylandGl = !forceXcb && (forceWayland || wayland);
+
+        if (useWaylandGl)
+        {
+            // NVIDIA+Hyprland: OpenGL widget composite is black; Vulkan RHI
+            // present works (mpv uses waylandvk). Default the window stack to
+            // Vulkan; image plane uses VulkanPresentWidget + GL offscreen FBO.
+            if (!getenv("QT_WIDGETS_RHI_BACKEND"))
+                setEnvVar("QT_WIDGETS_RHI_BACKEND", "vulkan");
+            if (!getenv("QSG_RHI_BACKEND"))
+                setEnvVar("QSG_RHI_BACKEND", "vulkan");
+            if (!getenv("QT_QUICK_BACKEND"))
+                setEnvVar("QT_QUICK_BACKEND", "rhi");
+            cout << "INFO: Wayland present path: QT_WIDGETS_RHI_BACKEND="
+                 << (getenv("QT_WIDGETS_RHI_BACKEND") ? getenv("QT_WIDGETS_RHI_BACKEND") : "vulkan")
+                 << " (Vulkan; QOpenGLWidget alone is black on this stack)"
+                 << endl;
+        }
+        else
+        {
+            // Qt 5.12.1 specific: QWebEngineView conflicts with QGLWidget when
+            // Quick uses the GPU path.
+            if (!getenv("QT_QUICK_BACKEND"))
+                setEnvVar("QT_QUICK_BACKEND", "software");
+        }
+    }
 
 #if defined(PLATFORM_LINUX)
     // Work around for Wacom Tablet issue on linux
@@ -368,6 +408,29 @@ int utf8Main(int argc, char* argv[])
     // Prevent crash at startup when multithreaded upload is enabled
     // (RV Preferences/Rendering/Multithread GPU Upload)
     QApplication::setAttribute(Qt::AA_DontCheckOpenGLContextThreadAffinity);
+    // Share GL contexts between the main RHI compositor and QOpenGLWidget.
+    QApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+
+    // Goal 2 HDR: do *not* setDefaultFormat(Bt2100Pq) here. That tags the
+    // entire Qt window (menus, toolbars, docks) as PQ and wrecks the UI.
+    // Image-plane colorspace is set only on GLView's format; display encode is
+    // DisplayIPNode → ColorLinearSMPTE2084 when RV_HDR=1. Opt into whole-window
+    // PQ (debug only) with RV_HDR_SURFACE=1.
+    {
+        const char* hdrSurf = getenv("RV_HDR_SURFACE");
+        const bool wholeWindowPq = hdrSurf && *hdrSurf && strcmp(hdrSurf, "0") && strcmp(hdrSurf, "false")
+                                   && strcmp(hdrSurf, "off") && strcmp(hdrSurf, "no");
+        if (wholeWindowPq)
+        {
+            QSurfaceFormat fmt = QSurfaceFormat::defaultFormat();
+            fmt.setRenderableType(QSurfaceFormat::OpenGL);
+            fmt.setColorSpace(QColorSpace(QColorSpace::Bt2100Pq));
+            QSurfaceFormat::setDefaultFormat(fmt);
+            cout << "INFO: RV_HDR_SURFACE=1 — whole-window Bt2100Pq "
+                    "(UI chrome will also be interpreted as PQ)"
+                 << endl;
+        }
+    }
 
     TwkUtil::MemPool::initialize();
 

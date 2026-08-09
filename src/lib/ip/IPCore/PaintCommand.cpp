@@ -167,7 +167,7 @@ namespace IPCore
             GLState* glState = context.glState;
 
             currentFBO->bind();
-            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             TWK_GLDEBUG;
             glClear(GL_COLOR_BUFFER_BIT);
             TWK_GLDEBUG;
@@ -353,7 +353,7 @@ namespace IPCore
             textureFBO->bindColorTexture(0);
 
             glDisable(GL_BLEND);
-            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             TWK_GLDEBUG;
             glClear(GL_COLOR_BUFFER_BIT);
             TWK_GLDEBUG;
@@ -422,7 +422,7 @@ namespace IPCore
 
                     // Pass 1: stamps into cleared currentFBO
                     glDisable(GL_BLEND);
-                    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+                    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
                     glClear(GL_COLOR_BUFFER_BIT);
                     glEnable(GL_BLEND);
                     glBlendEquationSeparate(GL_MAX, GL_MAX);

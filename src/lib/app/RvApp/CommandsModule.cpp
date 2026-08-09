@@ -1112,7 +1112,15 @@ namespace Rv
 
         const TwkFB::FrameBuffer* fb = name ? s->currentFB(name->c_str()) : s->currentFB();
 
-        if (fb && fb->uncrop())
+        // currentFB() is often null before the first evaluate / while the
+        // display image is still empty (e.g. early event bindings). Guard
+        // before any fb->width() use — previously this SIGSEGV'd.
+        if (!fb || fb->width() <= 0 || fb->height() <= 0)
+        {
+            NODE_RETURN(p);
+        }
+
+        if (fb->uncrop())
         {
             //
             // Handle the case of an uncropped image. Reorient the coordinate
@@ -1147,9 +1155,9 @@ namespace Rv
         x = static_cast<int>(x + 0.5f) % fb->width();
         y = static_cast<int>(y + 0.5f) % fb->height();
 
-        if (!fb || x >= fb->width() || y >= fb->height() || x < 0 || y < 0)
+        if (x >= fb->width() || y >= fb->height() || x < 0 || y < 0)
         {
-            return p;
+            NODE_RETURN(p);
         }
 
         TwkFB::linearRGBA709pixelValue(fb, int(x), int(y), &p[0]);

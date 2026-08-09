@@ -21,12 +21,31 @@
 #include <IPCore/IPProperty.h>
 #include <IPCore/DispTransform2DIPNode.h>
 #include <IPCore/NodeDefinition.h>
+#include <cstdlib>
+#include <cstring>
 
 namespace IPCore
 {
     using namespace std;
     using namespace TwkContainer;
     using namespace TwkMath;
+
+    namespace
+    {
+        // Goal 2: RV_HDR=1 forces display path to SMPTE-2084 (PQ). Combined with
+        // a Wayland surface color space of Bt2100Pq (see GLView/main), Hyprland
+        // can show absolute nits. The PQ shader expects linear input as nits/100
+        // (1.0 = 100 nits); values >1 map above that (e.g. 10.0 → 1000 nits).
+        bool wantHdrDisplay()
+        {
+            const char* e = getenv("RV_HDR");
+            if (!e || !*e)
+                return false;
+            if (!strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off") || !strcmp(e, "no"))
+                return false;
+            return true;
+        }
+    } // namespace
 
     static inline Imath::V2f convert(Vec2f v) { return Imath::V2f(v.x, v.y); }
 
@@ -262,6 +281,32 @@ namespace IPCore
         int flood = propertyValue(m_channelFlood, 0);
 
         string overrideColorspace = propertyValue(m_overrideColorspace, "");
+
+        // HDR image path only (not UI): encode scene-linear → PQ (SMPTE-2084).
+        // ColorLinearSMPTE2084 expects linear as nits/100 (1.0 = 100 nits).
+        // PQ codes stay in [0,1] so 8-bit FBOs do not clamp the highlight
+        // *codes*. Absolute panel nits still require the image surface to be
+        // color-managed as PQ (GLView format Bt2100Pq; do not setDefaultFormat).
+        // This does *not* use color.brightness / -brightness (stops).
+        if (wantHdrDisplay() && overrideColorspace.empty())
+        {
+            overrideColorspace = TwkFB::ColorSpace::SMPTE2084();
+            linear2sRGB = false;
+            linear2Rec709 = false;
+            displayGamma = 1.0f;
+            // Leave brightness alone — user may still use -brightness, but HDR
+            // mode does not apply any automatic stop scale.
+            static bool once = false;
+            if (!once)
+            {
+                once = true;
+                cerr << "INFO: RV_HDR=1 — image display SMPTE-2084 PQ "
+                        "(linear nits/100: 1.0→100 nits, 4.0→400, 10.0→1000). "
+                        "UI stays on default window colorspace; "
+                        "RV_HDR_SURFACE=1 tags whole window as PQ (breaks chrome)."
+                     << endl;
+            }
+        }
 
         if (order != "")
         {

@@ -22,14 +22,27 @@ fi
 if [ -z "${RV_USE_SYSTEM_OPENSSL:-}" ] && [ -d "$RV_HOME/lib/OpenSSL" ]; then
   export LD_LIBRARY_PATH="$RV_HOME/lib/OpenSSL:$LD_LIBRARY_PATH"
 fi
-# OpenRV's main viewer is still X11/GLX-oriented (QOpenGLWidget + GLX).
-# Many desktops export QT_QPA_PLATFORM=wayland;xcb which makes Qt prefer
-# Wayland: UI/thumbnails work but the GL image plane can stay black.
-# Force XWayland (xcb) unless the user opts into native Wayland (goal 2 / HDR).
-#   RV_ALLOW_WAYLAND=1   → leave QT_QPA_PLATFORM alone
-#   RV_QT_PLATFORM=...   → explicit override (e.g. xcb, wayland)
+# Platform selection
+# ------------------
+# Goal 1 (stable SDR viewer): force XWayland (xcb). Desktop often exports
+# QT_QPA_PLATFORM=wayland;xcb which prefers Wayland and can black the GL plane.
+#
+# Goal 2 (HDR image path): RV_HDR=1
+#   - native Wayland (wp_color_management_v1 family)
+#   - DisplayIPNode encodes image → SMPTE-2084 PQ (not -brightness stops)
+#   - GLView requests Bt2100Pq on the *image widget only*
+#   - does NOT setDefaultFormat(PQ) — that PQ-tags menus/toolbars
+# Optional: RV_HDR_SURFACE=1 also tags the whole window as PQ (UI will look wrong)
+# Overrides (highest wins first):
+#   RV_QT_PLATFORM=xcb|wayland|...
+#   RV_HDR=1                 → QT_QPA_PLATFORM=wayland
+#   RV_ALLOW_WAYLAND=1       → leave QT_QPA_PLATFORM alone
+#   else + DISPLAY set       → force xcb
 if [ -n "${RV_QT_PLATFORM:-}" ]; then
   export QT_QPA_PLATFORM="$RV_QT_PLATFORM"
+elif [ -n "${RV_HDR:-}" ] && [ "${RV_HDR}" != "0" ] && [ "${RV_HDR}" != "false" ] && [ "${RV_HDR}" != "off" ]; then
+  export QT_QPA_PLATFORM=wayland
+  export RV_ALLOW_WAYLAND=1
 elif [ -z "${RV_ALLOW_WAYLAND:-}" ] && [ -n "${DISPLAY:-}" ]; then
   export QT_QPA_PLATFORM=xcb
 fi

@@ -14,8 +14,11 @@
 #include <QOffscreenSurface>
 #include <QtCore/QEvent>
 #include <QtCore/QTimer>
+#include <QImage>
 #include <TwkUtil/Timer.h>
 #include <boost/thread/thread.hpp>
+
+class QWidget;
 
 namespace Rv
 {
@@ -64,6 +67,14 @@ namespace Rv
         // For reference: https://doc.qt.io/qt-6/highdpi.html
         float devicePixelRatio() const;
 
+        // True when blitting the GL FBO to an alternate present widget (Vulkan
+        // QRhi or CPU QWidget) because Qt QOpenGLWidget composite is broken.
+        bool usingExternalPresent() const { return m_presentOverlay != nullptr; }
+
+        // Attach a present surface created before this GLView (Vulkan seed).
+        // Does not take ownership if parented elsewhere.
+        void setExternalPresentWidget(QWidget* present);
+
     public slots:
         void eventProcessingTimeout();
 
@@ -71,8 +82,12 @@ namespace Rv
         void initializeGL();
         void resizeGL(int w, int h);
         void paintGL();
+        void resizeEvent(QResizeEvent* event) override;
+        void moveEvent(QMoveEvent* event) override;
         bool validateReadPixels(int x, int y, int w, int h);
         void debugSaveFramebuffer();
+        void updateCpuPresentFallback();
+        void syncPresentOverlayGeometry();
 
     private:
         RvDocument* m_doc;
@@ -97,6 +112,9 @@ namespace Rv
         bool m_stopProcessingEvents;
         void* m_syncThreadData;
         QOpenGLContext* m_sharedContext;
+        // Child QWidget that paints grabFramebuffer() when Qt's Wayland GL
+        // composite path leaves the QOpenGLWidget blank (NVIDIA/Hyprland).
+        QWidget* m_presentOverlay;
     };
 
 } // namespace Rv

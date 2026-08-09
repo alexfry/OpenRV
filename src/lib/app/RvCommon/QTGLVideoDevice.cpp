@@ -115,7 +115,11 @@ namespace Rv
             return;
         }
 
-        if (const DesktopVideoDevice* desktopVideoDevice = dynamic_cast<const DesktopVideoDevice*>(d))
+        if (m_view && m_view->devicePixelRatioF() > 0.0)
+        {
+            m_devicePixelRatio = float(m_view->devicePixelRatioF());
+        }
+        else if (const DesktopVideoDevice* desktopVideoDevice = dynamic_cast<const DesktopVideoDevice*>(d))
         {
             const QList<QScreen*> screens = QGuiApplication::screens();
             if (desktopVideoDevice->qtScreen() < screens.size())
@@ -162,6 +166,20 @@ namespace Rv
                 redraw();
             }
         }
+    }
+
+    float QTGLVideoDevice::devicePixelRatio() const
+    {
+        // Live widget DPR is what QOpenGLWidget uses to size its FBO. Cached
+        // m_devicePixelRatio from QScreen can disagree under fractional scaling
+        // (e.g. screen 1.25, GL FBO effectively 2.0) and breaks fit/framing.
+        if (m_view)
+        {
+            const qreal dpr = m_view->devicePixelRatioF();
+            if (dpr > 0.0)
+                return float(dpr);
+        }
+        return m_devicePixelRatio > 0.0f ? m_devicePixelRatio : 1.0f;
     }
 
     VideoDevice::Resolution QTGLVideoDevice::resolution() const

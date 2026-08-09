@@ -48,6 +48,7 @@ SET(_sources
     RvApplication.cpp
     DiagnosticsView.cpp
     GLView.cpp
+    VulkanPresentWidget.cpp
     TwkQTAction.cpp
     MediaDirModel.cpp
     RvNetworkDialog.cpp
@@ -356,7 +357,45 @@ ENDIF()
 TARGET_INCLUDE_DIRECTORIES(
   ${_target}
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} # shaders/*.h embedded qsb blobs
 )
+
+# QRhi / QRhiWidget headers live under versioned Qt private-style paths.
+IF(RV_VFX_PLATFORM STRGREATER_EQUAL CY2024)
+  IF(TARGET Qt6::Gui)
+    GET_TARGET_PROPERTY(_qt_gui_includes Qt6::Gui INTERFACE_INCLUDE_DIRECTORIES)
+    FOREACH(_inc ${_qt_gui_includes})
+      IF(EXISTS "${_inc}/QtGui")
+        # Prefer versioned private include root if present (…/QtGui/6.x.x)
+        FILE(
+          GLOB _qt_gui_ver_dirs
+          LIST_DIRECTORIES true
+          "${_inc}/QtGui/6.*"
+        )
+        FOREACH(_ver ${_qt_gui_ver_dirs})
+          TARGET_INCLUDE_DIRECTORIES(${_target} PRIVATE ${_ver} ${_ver}/QtGui)
+        ENDFOREACH()
+      ENDIF()
+    ENDFOREACH()
+  ENDIF()
+  # System Qt layout: /usr/include/qt6/QtGui/6.11.1/QtGui/rhi/qrhi.h
+  IF(EXISTS "/usr/include/qt6/QtGui/6.11.1")
+    TARGET_INCLUDE_DIRECTORIES(
+      ${_target}
+      PRIVATE /usr/include/qt6/QtGui/6.11.1 /usr/include/qt6/QtGui/6.11.1/QtGui
+              /usr/include/qt6/QtCore/6.11.1 /usr/include/qt6/QtCore/6.11.1/QtCore
+    )
+  ENDIF()
+  # Vulkan headers (for QRhiVulkanInitParams / QVulkanInstance). Prefer system,
+  # else openrv-deps checkout of Khronos Vulkan-Headers.
+  IF(EXISTS "/usr/include/vulkan/vulkan.h")
+    TARGET_INCLUDE_DIRECTORIES(${_target} PRIVATE /usr/include)
+  ELSEIF(EXISTS "$ENV{HOME}/openrv-deps/vulkan-headers/include/vulkan/vulkan.h")
+    TARGET_INCLUDE_DIRECTORIES(${_target} PRIVATE $ENV{HOME}/openrv-deps/vulkan-headers/include)
+  ELSEIF(EXISTS "/home/alex/openrv-deps/vulkan-headers/include/vulkan/vulkan.h")
+    TARGET_INCLUDE_DIRECTORIES(${_target} PRIVATE /home/alex/openrv-deps/vulkan-headers/include)
+  ENDIF()
+ENDIF()
 
 TARGET_LINK_LIBRARIES(
   ${_target}

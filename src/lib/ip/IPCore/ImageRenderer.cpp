@@ -2448,7 +2448,7 @@ namespace IPCore
 
             if (m_reportGL && !controller)
             {
-                glClearColor(0.0f, 0.0f, 1.0f, 0.0f);
+                glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
                 TWK_GLDEBUG;
                 glClear(GL_COLOR_BUFFER_BIT);
                 TWK_GLDEBUG;
@@ -2627,7 +2627,10 @@ namespace IPCore
             HOP_CALL(glFinish();)
             HOP_PROF("ImageRenderer::clearBackgroundToBlack - glClearColor");
 
-            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            // Alpha must be 1.0: on Wayland, QOpenGLWidget FBOs are composited
+            // with the desktop using the alpha channel. A=0 shows the desktop
+            // through the image plane (reads as "empty"); X11 often ignores it.
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             TWK_GLDEBUG;
 
             HOP_CALL(glFinish();)
@@ -2679,7 +2682,8 @@ namespace IPCore
             break;
         }
 
-        glClearColor(grey, grey, grey, 0.0f);
+        // A=1: Wayland composites QOpenGLWidget via alpha (A=0 → desktop).
+        glClearColor(grey, grey, grey, 1.0f);
         TWK_GLDEBUG;
         glClear(GL_COLOR_BUFFER_BIT);
         TWK_GLDEBUG;
