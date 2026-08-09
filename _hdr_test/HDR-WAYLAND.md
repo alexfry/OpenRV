@@ -144,7 +144,7 @@ macOS Display P3 Extended / EDR more closely than PQ.
 | **`RV_HDR_PQ_REF_WHITE`** | **100** | Content reference white nits (ACES 100-nit containers / linear-1.0 calibration) |
 | `RV_GL_PROBE=1` | off | Log FBO L/C/R 8-bit samples (PQ100≈130, PQ400≈164, PQ1000≈192) |
 | `RV_HDR_TEST_PATTERN=1` | off | Synthetic PQ wedges in present (bypass GL) |
-| **`RV_HDR_GL_VK_INTEROP=0`** | **on** | Disable GL↔Vulkan external-memory interop; force CPU readback present |
+| **`RV_HDR_GL_VK_INTEROP=1`** | **off** | Opt-in GPU interop (GL blit → shared VkImage → GPU copy → present). Default is CPU readback (stable). |
 | `OCIO` | unset | OCIO config URI or path (see OCIO section) |
 
 ### `RV_HDR_PRESENT` values

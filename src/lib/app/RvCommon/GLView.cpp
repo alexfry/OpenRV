@@ -688,18 +688,34 @@ namespace Rv
         if (vk && QOpenGLContext::currentContext())
         {
             const bool wantFloat = needsFloatPresentTransfer();
-            const QSize px(std::max(1, int(std::lround(width() * devicePixelRatioF()))),
-                           std::max(1, int(std::lround(height() * devicePixelRatioF()))));
+            GLuint srcFbo = presentFramebufferObject();
+            if (srcFbo == 0)
+                srcFbo = defaultFramebufferObject();
+
+            // Use the *actual* bound present FBO size (viewport set in paintGL),
+            // not a re-derived width*dpr which can be off-by-one vs the widget FBO.
+            GLint vp[4] = {0, 0, 0, 0};
+            GLint prevFbo = 0;
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, srcFbo);
+            glGetIntegerv(GL_VIEWPORT, vp);
+            glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+            int fw = vp[2];
+            int fh = vp[3];
+            if (fw <= 0 || fh <= 0)
+            {
+                fw = std::max(1, int(std::lround(width() * devicePixelRatioF())));
+                fh = std::max(1, int(std::lround(height() * devicePixelRatioF())));
+            }
+            const QSize px(fw, fh);
+
             if (vk->ensureGpuInterop(QOpenGLContext::currentContext(), px, wantFloat))
             {
-                GLuint srcFbo = presentFramebufferObject();
-                if (srcFbo == 0)
-                    srcFbo = defaultFramebufferObject();
                 if (vk->blitFromGlFramebuffer(srcFbo, px.width(), px.height()))
                 {
                     glFlush();
-                    glFinish(); // serialize GL write before Vulkan samples shared image
-                    QTimer::singleShot(0, vk, [vk]() { vk->presentGpuInteropFrame(); });
+                    glFinish(); // serialize GL write before Vulkan copy/sample
+                    vk->presentGpuInteropFrame();
                     s_inPresent = false;
                     return;
                 }
@@ -842,10 +858,12 @@ namespace Rv
 
             m_firstPaintCompleted = true;
 
-            // Force alpha = 1 so Wayland/Qt does not composite the image plane
-            // as transparent over the desktop. (Same intent as the Qt 5.12.1
-            // opaque-texture workaround on macOS.)
-            const GLuint postFbo = QOpenGLContext::currentContext()->defaultFramebufferObject();
+            // Force alpha = 1 on the *present* FBO (float FBO for p3extended,
+            // else the widget default FBO). Binding only the default FBO left
+            // the float present target without the opaque alpha fix.
+            GLuint postFbo = presentFramebufferObject();
+            if (postFbo == 0)
+                postFbo = QOpenGLContext::currentContext()->defaultFramebufferObject();
             glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, postFbo);
             TWK_GLDEBUG;
 

@@ -391,13 +391,23 @@ namespace Rv
             return false;
         if (!glctx || !pixelSize.isValid())
             return false;
+        // Sticky disable after a failed create/blit — avoid hammering every frame.
+        static bool s_interopFailed = false;
+        if (s_interopFailed)
+        {
+            m_gpuInterop = false;
+            return false;
+        }
+
         if (!GlVkSharedImage::isSupported(m_rhi, glctx))
         {
             static bool once = false;
             if (!once)
             {
                 once = true;
-                cout << "INFO: GL↔Vulkan GPU interop unavailable; using CPU readback present" << endl;
+                // Default is CPU readback; set RV_HDR_GL_VK_INTEROP=1 to try zero-copy.
+                cout << "INFO: present uses CPU readback (set RV_HDR_GL_VK_INTEROP=1 for GPU interop)"
+                     << endl;
             }
             m_gpuInterop = false;
             return false;
@@ -412,17 +422,19 @@ namespace Rv
                 onceFail = true;
                 cout << "INFO: GL↔Vulkan shared image create failed; CPU readback present" << endl;
             }
+            s_interopFailed = true;
             m_gpuInterop = false;
             return false;
         }
-        // Drop owned upload texture; sampling uses m_shared->rhiTexture().
+        // Sample source is m_shared->sampleTexture() (separate VkImage, GPU-copied).
+        // Drop the CPU-upload texture so the pipeline binds the sample image.
         m_tex.reset();
         m_texIsFloat = float16;
         m_texSize = pixelSize;
-        m_gpuInterop = true;
         m_pipelineBuilt = false;
         m_srb.reset();
         m_pipeline.reset();
+        m_gpuInterop = true;
         return true;
     }
 
@@ -431,7 +443,20 @@ namespace Rv
         if (!usingGpuInterop())
             return false;
         if (!m_shared->blitFromFramebuffer(GLuint(srcFbo), width, height))
+        {
+            // Shared blit produced no pixels — permanently fall back to CPU path.
+            static bool once = false;
+            if (!once)
+            {
+                once = true;
+                cout << "INFO: disabling GPU interop after failed shared blit; CPU readback present"
+                     << endl;
+            }
+            m_gpuInterop = false;
+            if (m_shared)
+                m_shared->destroy();
             return false;
+        }
         m_sharedDirty = true;
         return true;
     }
@@ -442,10 +467,10 @@ namespace Rv
             return;
         m_hasPending = false;
         m_hasPendingFloat = false;
-        // Sample shared texture written by GL (caller already glFinish'd).
+        // GL has blitted into the shared image and glFinish'd. GPU-copy into the
+        // QRhi-owned texture and present (shared image never leaves GENERAL for GL).
         renderFrame();
-        // Ensure Vulkan finished sampling before the next GL write into the share.
-        m_rhi->finish();
+        m_sharedDirty = false;
     }
 
     bool VulkanPresentWindow::ensureSwapChain()
@@ -500,7 +525,8 @@ namespace Rv
         if (m_tex && m_texSize == pixelSize && m_texIsFloat == asFloat)
             return;
         m_tex.reset();
-        const QRhiTexture::Format fmt = asFloat ? QRhiTexture::RGBA32F : QRhiTexture::RGBA8;
+        // Interop shared image is RGBA16F for float; match so vkCmdCopyImage is valid.
+        const QRhiTexture::Format fmt = asFloat ? QRhiTexture::RGBA16F : QRhiTexture::RGBA8;
         m_tex.reset(m_rhi->newTexture(fmt, pixelSize, 1, {}));
         if (!m_tex->create())
         {
@@ -520,14 +546,14 @@ namespace Rv
             if (!once)
             {
                 once = true;
-                cout << "INFO: present upload texture RGBA32F (float transfer for p3extended)" << endl;
+                cout << "INFO: present sample texture RGBA16F (float transfer / interop copy target)" << endl;
             }
         }
     }
 
     void VulkanPresentWindow::ensurePipeline()
     {
-        QRhiTexture* sampleTex = usingGpuInterop() ? m_shared->rhiTexture() : m_tex.get();
+        QRhiTexture* sampleTex = usingGpuInterop() ? m_shared->sampleTexture() : m_tex.get();
         if (!m_rhi || m_pipelineBuilt || !sampleTex || !m_sampler || !m_rp || !m_ubuf)
             return;
 
@@ -619,18 +645,26 @@ namespace Rv
 
         if (interop)
         {
-            // Shared image already filled by GL blit; no CPU upload.
+            // Shared image already filled by GL blit; GPU-copy into sample image.
             texSize = m_shared->size();
-            haveTex = texSize.isValid();
-            // Shared GL texture is top-left or bottom-up depending on blit; FBO
-            // blit preserves orientation of the source FBO (GL bottom-up).
-            flipV = 1.f;
+            if (m_shared->copyToSampleTexture())
+            {
+                haveTex = true;
+                flipV = 1.f; // FBO blit preserves GL bottom-up orientation
+            }
+            else
+            {
+                static int s_copyFail = 0;
+                if (s_copyFail++ < 5)
+                    cerr << "ERROR: GPU interop copyToSampleTexture failed" << endl;
+            }
             static int s_ilog = 0;
             if (s_ilog++ < 3)
             {
                 cout << "INFO: present GPU interop " << texSize.width() << "x" << texSize.height()
                      << " swap=" << outputSize.width() << "x" << outputSize.height()
-                     << " shMode=" << presentShaderMode() << endl;
+                     << " shMode=" << presentShaderMode() << " copy=" << (haveTex ? "ok" : "fail")
+                     << endl;
             }
         }
         else if (m_hasPendingFloat && !m_pendingFloat.empty())
@@ -723,7 +757,7 @@ namespace Rv
             vpY = 0.5f * (float(outputSize.height()) - vpH);
         }
 
-        QRhiTexture* sampleTex = interop ? m_shared->rhiTexture() : m_tex.get();
+        QRhiTexture* sampleTex = interop ? m_shared->sampleTexture() : m_tex.get();
         const QColor clear = Qt::black;
         cb->beginPass(m_sc->currentFrameRenderTarget(), clear, {1.0f, 0}, u);
         if (m_pipeline && m_srb && sampleTex && m_vbuf && haveTex)
