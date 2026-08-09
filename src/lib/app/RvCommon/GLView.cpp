@@ -684,8 +684,29 @@ namespace Rv
 
         auto* vk = qobject_cast<VulkanPresentWidget*>(m_presentOverlay);
 
-        // Float transfer for p3extended: read RGBA16F FBO (preserves >1.0).
-        // Leave bottom-up; Vulkan present flips V on the GPU (no CPU flip/scale).
+        // Prefer GPU interop: blit FBO → shared GL/Vk image (no readback).
+        if (vk && QOpenGLContext::currentContext())
+        {
+            const bool wantFloat = needsFloatPresentTransfer();
+            const QSize px(std::max(1, int(std::lround(width() * devicePixelRatioF()))),
+                           std::max(1, int(std::lround(height() * devicePixelRatioF()))));
+            if (vk->ensureGpuInterop(QOpenGLContext::currentContext(), px, wantFloat))
+            {
+                GLuint srcFbo = presentFramebufferObject();
+                if (srcFbo == 0)
+                    srcFbo = defaultFramebufferObject();
+                if (vk->blitFromGlFramebuffer(srcFbo, px.width(), px.height()))
+                {
+                    glFlush();
+                    glFinish(); // serialize GL write before Vulkan samples shared image
+                    QTimer::singleShot(0, vk, [vk]() { vk->presentGpuInteropFrame(); });
+                    s_inPresent = false;
+                    return;
+                }
+            }
+        }
+
+        // CPU readback fallback (slower; used if interop unavailable).
         if (vk && m_floatPresentFbo && m_floatPresentFbo->isValid() && needsFloatPresentTransfer())
         {
             const int w = m_floatPresentFbo->width();
@@ -704,7 +725,6 @@ namespace Rv
             return;
         }
 
-        // 8-bit path (PQ and non-float modes).
         QImage img = grabFramebuffer();
         if (img.isNull())
         {

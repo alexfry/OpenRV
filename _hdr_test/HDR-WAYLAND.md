@@ -27,8 +27,10 @@ perfect HUD color on the HDR surface.
   IP graph  ──►  OCIODisplay  (optional: scene_linear → PQ or other view)
        │         or RVDisplayColor / DisplayIPNode (RV_HDR → SMPTE-2084)
        ▼
-  GL FBO  (today: 8-bit UNORM grab; typically already PQ codes)
+  GL FBO  (RGBA8 PQ codes, or RGBA16F for p3extended)
        │
+       │   GPU interop (default): glBlit → GL↔Vk shared image (opaque FD)
+       │   CPU fallback: glReadPixels / grabFramebuffer → upload
        ▼
   Vulkan present (QRhi swapchain)  ──►  Hyprland color management
        │
@@ -45,6 +47,30 @@ perfect HUD color on the HDR surface.
 **Post-OCIO:** all present encodes/scales happen in the **Vulkan present
 fragment shader**, after the FBO already holds OCIO/Display output. The IP
 graph is not modified by `RV_HDR_PRESENT` / `RV_HDR_PQ_SDR_SCALE`.
+
+### GL → Vulkan handoff (GPU interop)
+
+The old bottleneck was full-frame **CPU readback** (`glReadPixels` /
+`grabFramebuffer`) + upload into a QRhi texture — that capped playback around
+~11 fps at large window sizes while the non-HDR GL path stayed locked at 24.
+
+**Default path now keeps the frame on the GPU:**
+
+1. Vulkan allocates an exportable `VkImage` (`VK_KHR_external_memory_fd`).
+2. GL imports it via `GL_EXT_memory_object_fd` as a texture.
+3. Each frame: `glBlitFramebuffer` from the present FBO → shared texture,
+   `glFinish`, then the present pass samples the same image through
+   `QRhiTexture::createFrom` (layout `GENERAL`). Serial sync is
+   `glFinish` + `QRhi::finish()` (v1; can move to semaphores later).
+
+Log line when active:
+
+```
+INFO: GL↔Vulkan shared image WxH RGBA8|RGBA16F (GPU interop, no CPU readback)
+INFO: present GPU interop WxH swap=... shMode=...
+```
+
+Force the old CPU path for A/B: `RV_HDR_GL_VK_INTEROP=0`.
 
 ---
 
@@ -118,6 +144,7 @@ macOS Display P3 Extended / EDR more closely than PQ.
 | **`RV_HDR_PQ_REF_WHITE`** | **100** | Content reference white nits (ACES 100-nit containers / linear-1.0 calibration) |
 | `RV_GL_PROBE=1` | off | Log FBO L/C/R 8-bit samples (PQ100≈130, PQ400≈164, PQ1000≈192) |
 | `RV_HDR_TEST_PATTERN=1` | off | Synthetic PQ wedges in present (bypass GL) |
+| **`RV_HDR_GL_VK_INTEROP=0`** | **on** | Disable GL↔Vulkan external-memory interop; force CPU readback present |
 | `OCIO` | unset | OCIO config URI or path (see OCIO section) |
 
 ### `RV_HDR_PRESENT` values

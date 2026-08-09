@@ -49,6 +49,7 @@ SET(_sources
     DiagnosticsView.cpp
     GLView.cpp
     VulkanPresentWidget.cpp
+    GlVkSharedImage.cpp
     TwkQTAction.cpp
     MediaDirModel.cpp
     RvNetworkDialog.cpp

@@ -3,6 +3,7 @@
 //******************************************************************************
 
 #include <RvCommon/VulkanPresentWidget.h>
+#include <RvCommon/GlVkSharedImage.h>
 
 // Vulkan headers must be visible before qrhi_platform.h enables QRhiVulkanInitParams.
 #include <vulkan/vulkan.h>
@@ -10,6 +11,8 @@
 #include <rhi/qrhi.h>
 #include <rhi/qshader.h>
 #include <rhi/qrhi_platform.h>
+
+#include <QOpenGLContext>
 
 #include <QColorSpace>
 #include <QExposeEvent>
@@ -211,21 +214,45 @@ namespace Rv
         if (m_rhi)
             return;
 
-        m_inst = new QVulkanInstance;
-        m_inst->setExtensions(QRhiVulkanInitParams::preferredInstanceExtensions());
-        if (!m_inst->create())
-        {
-            cerr << "ERROR: QVulkanInstance::create failed" << endl;
-            delete m_inst;
-            m_inst = nullptr;
+        // QRhi needs a realized platform window to pick a present-capable queue.
+        // ensureGpuInterop can run from GL paint before first expose — refuse early
+        // so we don't burn a failed create and leave a half-init instance.
+        if (!handle() || !isExposed())
             return;
+
+        if (!m_inst)
+        {
+            m_inst = new QVulkanInstance;
+            // External-memory capabilities are an instance extension on some stacks.
+            QByteArrayList instExt = QRhiVulkanInitParams::preferredInstanceExtensions();
+            if (!instExt.contains("VK_KHR_external_memory_capabilities"))
+                instExt.append("VK_KHR_external_memory_capabilities");
+            if (!instExt.contains("VK_KHR_get_physical_device_properties2"))
+                instExt.append("VK_KHR_get_physical_device_properties2");
+            m_inst->setExtensions(instExt);
+            if (!m_inst->create())
+            {
+                cerr << "ERROR: QVulkanInstance::create failed" << endl;
+                delete m_inst;
+                m_inst = nullptr;
+                return;
+            }
+            setVulkanInstance(m_inst);
         }
-        setVulkanInstance(m_inst);
 
         QRhiVulkanInitParams params;
         params.inst = m_inst;
         params.window = this;
+        // Enable external memory so we can share color images with OpenGL (no readback).
+        params.deviceExtensions = GlVkSharedImage::requiredDeviceExtensions();
         m_rhi = QRhi::create(QRhi::Vulkan, &params);
+        if (!m_rhi)
+        {
+            cerr << "WARNING: QRhi Vulkan with external-memory extensions failed; retrying without"
+                 << endl;
+            params.deviceExtensions.clear();
+            m_rhi = QRhi::create(QRhi::Vulkan, &params);
+        }
         if (!m_rhi)
         {
             cerr << "ERROR: QRhi::create(Vulkan) failed" << endl;
@@ -234,7 +261,8 @@ namespace Rv
         cout << "INFO: VulkanPresentWindow RHI backend=" << m_rhi->backendName()
              << " platform=" << QGuiApplication::platformName().toStdString()
              << " dpr=" << devicePixelRatio() << " size=" << width() << "x" << height()
-             << " yUpNDC=" << m_rhi->isYUpInNDC() << " yUpFB=" << m_rhi->isYUpInFramebuffer() << endl;
+             << " yUpNDC=" << m_rhi->isYUpInNDC() << " yUpFB=" << m_rhi->isYUpInFramebuffer()
+             << " extMem=" << (params.deviceExtensions.isEmpty() ? "no" : "yes") << endl;
 
         m_sc.reset(m_rhi->newSwapChain());
         m_ds.reset(m_rhi->newRenderBuffer(QRhiRenderBuffer::DepthStencil, QSize(), 1,
@@ -333,6 +361,11 @@ namespace Rv
         m_rp.reset();
         m_ds.reset();
         m_sc.reset();
+        if (m_shared)
+            m_shared->destroy();
+        m_shared.reset();
+        m_gpuInterop = false;
+        m_sharedDirty = false;
         delete m_rhi;
         m_rhi = nullptr;
         if (m_inst)
@@ -345,6 +378,74 @@ namespace Rv
         m_texSize = QSize();
         m_running = false;
         m_vbufUploaded = false;
+    }
+
+    bool VulkanPresentWindow::usingGpuInterop() const { return m_gpuInterop && m_shared && m_shared->valid(); }
+
+    bool VulkanPresentWindow::ensureGpuInterop(QOpenGLContext* glctx, const QSize& pixelSize, bool float16)
+    {
+        // Do not init RHI from the GL paint path before the present window is
+        // exposed — that fails queue selection and can poison startup. Wait for
+        // exposeEvent to create QRhi, then flip to interop on a later frame.
+        if (!m_rhi)
+            return false;
+        if (!glctx || !pixelSize.isValid())
+            return false;
+        if (!GlVkSharedImage::isSupported(m_rhi, glctx))
+        {
+            static bool once = false;
+            if (!once)
+            {
+                once = true;
+                cout << "INFO: GL↔Vulkan GPU interop unavailable; using CPU readback present" << endl;
+            }
+            m_gpuInterop = false;
+            return false;
+        }
+        if (!m_shared)
+            m_shared = std::make_unique<GlVkSharedImage>();
+        if (!m_shared->create(m_rhi, glctx, pixelSize, float16))
+        {
+            static bool onceFail = false;
+            if (!onceFail)
+            {
+                onceFail = true;
+                cout << "INFO: GL↔Vulkan shared image create failed; CPU readback present" << endl;
+            }
+            m_gpuInterop = false;
+            return false;
+        }
+        // Drop owned upload texture; sampling uses m_shared->rhiTexture().
+        m_tex.reset();
+        m_texIsFloat = float16;
+        m_texSize = pixelSize;
+        m_gpuInterop = true;
+        m_pipelineBuilt = false;
+        m_srb.reset();
+        m_pipeline.reset();
+        return true;
+    }
+
+    bool VulkanPresentWindow::blitFromGlFramebuffer(unsigned int srcFbo, int width, int height)
+    {
+        if (!usingGpuInterop())
+            return false;
+        if (!m_shared->blitFromFramebuffer(GLuint(srcFbo), width, height))
+            return false;
+        m_sharedDirty = true;
+        return true;
+    }
+
+    void VulkanPresentWindow::presentGpuInteropFrame()
+    {
+        if (!usingGpuInterop() || !m_rhi || !isExposed())
+            return;
+        m_hasPending = false;
+        m_hasPendingFloat = false;
+        // Sample shared texture written by GL (caller already glFinish'd).
+        renderFrame();
+        // Ensure Vulkan finished sampling before the next GL write into the share.
+        m_rhi->finish();
     }
 
     bool VulkanPresentWindow::ensureSwapChain()
@@ -426,14 +527,15 @@ namespace Rv
 
     void VulkanPresentWindow::ensurePipeline()
     {
-        if (!m_rhi || m_pipelineBuilt || !m_tex || !m_sampler || !m_rp || !m_ubuf)
+        QRhiTexture* sampleTex = usingGpuInterop() ? m_shared->rhiTexture() : m_tex.get();
+        if (!m_rhi || m_pipelineBuilt || !sampleTex || !m_sampler || !m_rp || !m_ubuf)
             return;
 
         m_srb.reset(m_rhi->newShaderResourceBindings());
         m_srb->setBindings({
             QRhiShaderResourceBinding::uniformBuffer(
                 0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, m_ubuf.get()),
-            QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, m_tex.get(),
+            QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, sampleTex,
                                                       m_sampler.get()),
         });
         if (!m_srb->create())
@@ -510,14 +612,30 @@ namespace Rv
         const QSize outputSize = m_sc->currentPixelSize();
 
         // Letterbox in the GPU viewport — never CPU-scale full frames.
-        // Upload texture at native grab size; fit into swapchain with black bars.
         float flipV = 0.f;
         QSize texSize;
         bool haveTex = false;
+        const bool interop = usingGpuInterop();
 
-        if (m_hasPendingFloat && !m_pendingFloat.empty())
+        if (interop)
         {
-            // Float path: raw GL readback (bottom-up). Flip V in the vertex shader.
+            // Shared image already filled by GL blit; no CPU upload.
+            texSize = m_shared->size();
+            haveTex = texSize.isValid();
+            // Shared GL texture is top-left or bottom-up depending on blit; FBO
+            // blit preserves orientation of the source FBO (GL bottom-up).
+            flipV = 1.f;
+            static int s_ilog = 0;
+            if (s_ilog++ < 3)
+            {
+                cout << "INFO: present GPU interop " << texSize.width() << "x" << texSize.height()
+                     << " swap=" << outputSize.width() << "x" << outputSize.height()
+                     << " shMode=" << presentShaderMode() << endl;
+            }
+        }
+        else if (m_hasPendingFloat && !m_pendingFloat.empty())
+        {
+            // CPU float fallback (p3extended without interop).
             const int srcW = m_pendingFloatW;
             const int srcH = m_pendingFloatH;
             texSize = QSize(srcW, srcH);
@@ -532,28 +650,12 @@ namespace Rv
                 QRhiTextureUploadDescription desc(entry);
                 u->uploadTexture(m_tex.get(), desc);
                 haveTex = true;
-                flipV = 1.f; // glReadPixels origin
+                flipV = 1.f;
             }
             m_hasPendingFloat = false;
-
-            static int s_flog = 0;
-            if (s_flog++ < 5 && srcW > 0 && srcH > 0)
-            {
-                auto samp = [&](float fx) {
-                    const int x = int(fx * (srcW - 1));
-                    const int y = srcH / 2; // mid of bottom-up buffer ≈ visual mid after flip
-                    return m_pendingFloat[(size_t(y) * srcW + x) * 4];
-                };
-                cout << "INFO: present upload FLOAT " << srcW << "x" << srcH
-                     << " swap=" << outputSize.width() << "x" << outputSize.height()
-                     << " (GPU letterbox+flip) LCR_f≈" << samp(0.2f) << "," << samp(0.5f) << ","
-                     << samp(0.8f) << " scFmt=" << m_swapchainFormat << " shMode=" << presentShaderMode()
-                     << endl;
-            }
         }
         else if (m_hasPending && !m_pending.isNull())
         {
-            // 8-bit path: grabFramebuffer is already top-left (no flip).
             QImage img = m_pending;
             if (getenv("RV_HDR_TEST_PATTERN") && *getenv("RV_HDR_TEST_PATTERN") != '0' && m_hdr)
             {
@@ -587,23 +689,8 @@ namespace Rv
                 flipV = 0.f;
             }
             m_hasPending = false;
-
-            static int s_log = 0;
-            if (s_log++ < 5)
-            {
-                auto samp = [&](float fx) {
-                    const int x = int(fx * (img.width() - 1));
-                    const int y = img.height() / 2;
-                    return int(img.pixelColor(x, y).red());
-                };
-                cout << "INFO: present upload " << img.width() << "x" << img.height()
-                     << " swap=" << outputSize.width() << "x" << outputSize.height()
-                     << " (GPU letterbox) LCR8=" << samp(0.2f) << "," << samp(0.5f) << "," << samp(0.8f)
-                     << " scFmt=" << m_swapchainFormat << " shMode=" << presentShaderMode() << endl;
-            }
         }
 
-        // UBO: color-mode params + flip flag (params.w).
         {
             QMatrix4x4 corr = m_rhi->clipSpaceCorrMatrix();
             alignas(16) float ubo[20];
@@ -624,7 +711,6 @@ namespace Rv
 
         ensurePipeline();
 
-        // Fit texture aspect into swapchain (letterbox/pillarbox) on GPU.
         float vpX = 0.f, vpY = 0.f, vpW = float(outputSize.width()), vpH = float(outputSize.height());
         if (haveTex && texSize.isValid() && outputSize.isValid() && texSize.width() > 0 && texSize.height() > 0)
         {
@@ -637,9 +723,10 @@ namespace Rv
             vpY = 0.5f * (float(outputSize.height()) - vpH);
         }
 
+        QRhiTexture* sampleTex = interop ? m_shared->rhiTexture() : m_tex.get();
         const QColor clear = Qt::black;
         cb->beginPass(m_sc->currentFrameRenderTarget(), clear, {1.0f, 0}, u);
-        if (m_pipeline && m_srb && m_tex && m_vbuf && haveTex)
+        if (m_pipeline && m_srb && sampleTex && m_vbuf && haveTex)
         {
             cb->setGraphicsPipeline(m_pipeline.get());
             cb->setViewport(QRhiViewport(vpX, vpY, vpW, vpH));
@@ -845,5 +932,26 @@ namespace Rv
     }
 
     bool VulkanPresentWidget::hdrPresent() const { return m_window ? m_window->hdrPresent() : false; }
+
+    bool VulkanPresentWidget::usingGpuInterop() const
+    {
+        return m_window && m_window->usingGpuInterop();
+    }
+
+    bool VulkanPresentWidget::ensureGpuInterop(QOpenGLContext* glctx, const QSize& pixelSize, bool float16)
+    {
+        return m_window && m_window->ensureGpuInterop(glctx, pixelSize, float16);
+    }
+
+    bool VulkanPresentWidget::blitFromGlFramebuffer(unsigned int srcFbo, int width, int height)
+    {
+        return m_window && m_window->blitFromGlFramebuffer(srcFbo, width, height);
+    }
+
+    void VulkanPresentWidget::presentGpuInteropFrame()
+    {
+        if (m_window)
+            m_window->presentGpuInteropFrame();
+    }
 
 } // namespace Rv

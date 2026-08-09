@@ -11,8 +11,11 @@
 #include <QWidget>
 #include <QImage>
 #include <QWindow>
+#include <QSize>
 #include <memory>
 #include <vector>
+
+class QOpenGLContext;
 
 class QRhi;
 class QRhiTexture;
@@ -45,13 +48,20 @@ namespace Rv
         };
 
         void setFrame(QImage img);
-        // Float RGBA (top-left origin), for p3extended / EDR headroom.
+        // Float RGBA (top-left origin), for p3extended / EDR headroom (CPU fallback).
         void setFrameFloat(int width, int height, std::vector<float> rgba);
         void setHdrPresent(bool enabled);
         bool hdrPresent() const { return m_hdr; }
         PresentMode presentMode() const { return m_presentMode; }
         // True when the present path requires float transfer (p3extended).
         static bool presentModeNeedsFloatTransfer();
+
+        // GPU interop (no readback): prepare shared image, blit from GL FBO, present.
+        // srcFbo is a GL framebuffer name (unsigned = GLuint; avoid OpenGL headers here).
+        bool usingGpuInterop() const;
+        bool ensureGpuInterop(QOpenGLContext* glctx, const QSize& pixelSize, bool float16);
+        bool blitFromGlFramebuffer(unsigned int srcFbo, int width, int height);
+        void presentGpuInteropFrame();
 
     protected:
         void exposeEvent(QExposeEvent*) override;
@@ -103,6 +113,9 @@ namespace Rv
         QSize m_texSize;
         bool m_pipelineBuilt = false;
         bool m_vbufUploaded = false;
+        bool m_gpuInterop = false;
+        bool m_sharedDirty = false; // GL wrote shared image this frame
+        std::unique_ptr<class GlVkSharedImage> m_shared;
     };
 
     // QWidget wrapper: embeds VulkanPresentWindow via createWindowContainer.
@@ -122,6 +135,10 @@ namespace Rv
         {
             return VulkanPresentWindow::presentModeNeedsFloatTransfer();
         }
+        bool usingGpuInterop() const;
+        bool ensureGpuInterop(QOpenGLContext* glctx, const QSize& pixelSize, bool float16);
+        bool blitFromGlFramebuffer(unsigned int srcFbo, int width, int height);
+        void presentGpuInteropFrame();
 
     private:
         VulkanPresentWindow* m_window = nullptr;
