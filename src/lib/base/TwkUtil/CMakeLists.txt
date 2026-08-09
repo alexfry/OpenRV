@@ -107,10 +107,54 @@ ELSEIF(RV_TARGET_WINDOWS)
 ENDIF()
 
 IF(RV_TARGET_LINUX)
+  # Prefer system libaio; fall back to a user-installed prefix (e.g. openrv-deps/libaio on Arch).
+  FIND_PATH(
+    LIBAIO_INCLUDE_DIR
+    NAMES libaio.h
+    PATHS "${LIBAIO_ROOT}/include" "$ENV{LIBAIO_ROOT}/include" "${RV_DEPS_BASE_DIR}/libaio/include" /usr/include
+  )
+  FIND_LIBRARY(
+    LIBAIO_LIBRARY
+    NAMES aio
+    PATHS "${LIBAIO_ROOT}/lib" "$ENV{LIBAIO_ROOT}/lib" "${RV_DEPS_BASE_DIR}/libaio/lib" /usr/lib /usr/lib64
+  )
+  IF(NOT LIBAIO_INCLUDE_DIR
+     OR NOT LIBAIO_LIBRARY
+  )
+    MESSAGE(FATAL_ERROR "libaio not found (need libaio.h and libaio). Set LIBAIO_ROOT or install libaio-devel.")
+  ENDIF()
+  TARGET_INCLUDE_DIRECTORIES(
+    ${_target}
+    PRIVATE ${LIBAIO_INCLUDE_DIR}
+  )
   TARGET_LINK_LIBRARIES(
     ${_target}
-    PRIVATE aio
+    PRIVATE ${LIBAIO_LIBRARY}
   )
+  # Ensure dependents can resolve libaio at link and run time when using a non-system install.
+  GET_FILENAME_COMPONENT(_libaio_lib_dir "${LIBAIO_LIBRARY}" DIRECTORY)
+  TARGET_LINK_OPTIONS(
+    ${_target}
+    PRIVATE "LINKER:-rpath-link,${_libaio_lib_dir}"
+  )
+  SET_TARGET_PROPERTIES(
+    ${_target}
+    PROPERTIES BUILD_RPATH "${_libaio_lib_dir};${RV_STAGE_LIB_DIR}" INSTALL_RPATH "${RV_STAGE_LIB_DIR}"
+  )
+  # Stage libaio into the app tree so executables link without system packages.
+  FILE(
+    GLOB _libaio_sos
+    "${_libaio_lib_dir}/libaio.so*"
+  )
+  FOREACH(
+    _aio_so
+    ${_libaio_sos}
+  )
+    FILE(
+      COPY "${_aio_so}"
+      DESTINATION "${RV_STAGE_LIB_DIR}"
+    )
+  ENDFOREACH()
 ENDIF()
 
 IF(RV_TARGET_WINDOWS)

@@ -5,6 +5,7 @@
 :hidden:
 :caption: Platforms setup
 build_system/config_linux_rocky89
+build_system/config_linux_arch_qt611_wayland
 build_system/config_macos
 build_system/config_windows
 ```

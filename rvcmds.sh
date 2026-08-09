@@ -80,48 +80,65 @@ fi
 if [ -z "$QT_HOME" ]; then
   echo "Searching for Qt installation..."
 
-  if [[ "$OSTYPE" == "linux"* ]]; then
+  # Prefer explicit system Qt when requested
+  if [[ "${RV_USE_SYSTEM_QT}" == "1" || "${RV_USE_SYSTEM_QT}" == "ON" || "${RV_USE_SYSTEM_QT}" == "on" ]]; then
+    if [ -d /usr/lib/cmake/Qt6 ]; then
+      QT_HOME=/usr
+      QT_VERSION="system"
+      echo "Using system Qt at $QT_HOME (RV_USE_SYSTEM_QT=$RV_USE_SYSTEM_QT)"
+    else
+      echo "Error: RV_USE_SYSTEM_QT is set but /usr/lib/cmake/Qt6 was not found."
+    fi
+  elif [[ "$OSTYPE" == "linux"* ]]; then
     if [[ "$RV_VFX_PLATFORM" == "CY2026" ]]; then
-      QT_HOME=$(find ~/Qt*/6.8.* -maxdepth 4 -type d -path '*/gcc_64' | sort -V | tail -n 1)
+      QT_HOME=$(find ~/Qt*/6.8.* -maxdepth 4 -type d -path '*/gcc_64' 2>/dev/null | sort -V | tail -n 1)
       QT_VERSION="6.8"
     elif [[ "$RV_VFX_PLATFORM" == "CY2025" || "$RV_VFX_PLATFORM" == "CY2024" ]]; then
-      QT_HOME=$(find ~/Qt*/6.5* -maxdepth 4 -type d -path '*/gcc_64' | sort -V | tail -n 1)
+      QT_HOME=$(find ~/Qt*/6.5* -maxdepth 4 -type d -path '*/gcc_64' 2>/dev/null | sort -V | tail -n 1)
       QT_VERSION="6.5"
     elif [[ "$RV_VFX_PLATFORM" == "CY2023" ]]; then
-      QT_HOME=$(find ~/Qt*/5.15* -maxdepth 4 -type d -path '*/gcc_64' | sort -V | tail -n 1)
+      QT_HOME=$(find ~/Qt*/5.15* -maxdepth 4 -type d -path '*/gcc_64' 2>/dev/null | sort -V | tail -n 1)
       QT_VERSION="5.15"
     fi
   elif [[ "$OSTYPE" == "darwin"* ]]; then
     if [[ "$RV_VFX_PLATFORM" == "CY2026" ]]; then
-      QT_HOME=$(find ~/Qt*/6.8.* -maxdepth 4 -type d -path '*/macos' | sort -V | tail -n 1)
+      QT_HOME=$(find ~/Qt*/6.8.* -maxdepth 4 -type d -path '*/macos' 2>/dev/null | sort -V | tail -n 1)
       if [ -z "$QT_HOME" ]; then
-        QT_HOME=$(find ~/Qt*/6.8.* -maxdepth 4 -type d -path '*/clang_64' | sort -V | tail -n 1)
+        QT_HOME=$(find ~/Qt*/6.8.* -maxdepth 4 -type d -path '*/clang_64' 2>/dev/null | sort -V | tail -n 1)
       fi
       QT_VERSION="6.8"
     elif [[ "$RV_VFX_PLATFORM" == "CY2025" || "$RV_VFX_PLATFORM" == "CY2024" ]]; then
-      QT_HOME=$(find ~/Qt*/6.5* -maxdepth 4 -type d -path '*/macos' | sort -V | tail -n 1)
+      QT_HOME=$(find ~/Qt*/6.5* -maxdepth 4 -type d -path '*/macos' 2>/dev/null | sort -V | tail -n 1)
       if [ -z "$QT_HOME" ]; then
-        QT_HOME=$(find ~/Qt*/6.5* -maxdepth 4 -type d -path '*/clang_64' | sort -V | tail -n 1)
+        QT_HOME=$(find ~/Qt*/6.5* -maxdepth 4 -type d -path '*/clang_64' 2>/dev/null | sort -V | tail -n 1)
       fi
       QT_VERSION="6.5"
     elif [[ "$RV_VFX_PLATFORM" == "CY2023" ]]; then
-      QT_HOME=$(find ~/Qt*/5.15* -maxdepth 4 -type d -path '*/macos' | sort -V | tail -n 1)
+      QT_HOME=$(find ~/Qt*/5.15* -maxdepth 4 -type d -path '*/macos' 2>/dev/null | sort -V | tail -n 1)
       if [ -z "$QT_HOME" ]; then
-        QT_HOME=$(find ~/Qt*/5.15* -maxdepth 4 -type d -path '*/clang_64' | sort -V | tail -n 1)
+        QT_HOME=$(find ~/Qt*/5.15* -maxdepth 4 -type d -path '*/clang_64' 2>/dev/null | sort -V | tail -n 1)
       fi
       QT_VERSION="5.15"
     fi
   elif [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* ]]; then
     if [[ "$RV_VFX_PLATFORM" == "CY2026" ]]; then
-      QT_HOME=$(find c:/Qt*/6.8* -maxdepth 4 -type d -path '*/msvc2019_64' | sort -V | tail -n 1)
+      QT_HOME=$(find c:/Qt*/6.8* -maxdepth 4 -type d -path '*/msvc2019_64' 2>/dev/null | sort -V | tail -n 1)
       QT_VERSION="6.8"
     elif [[ "$RV_VFX_PLATFORM" == "CY2025" || "$RV_VFX_PLATFORM" == "CY2024" ]]; then
-      QT_HOME=$(find c:/Qt*/6.5* -maxdepth 4 -type d -path '*/msvc2019_64' | sort -V | tail -n 1)
+      QT_HOME=$(find c:/Qt*/6.5* -maxdepth 4 -type d -path '*/msvc2019_64' 2>/dev/null | sort -V | tail -n 1)
       QT_VERSION="6.5"
     elif [[ "$RV_VFX_PLATFORM" == "CY2023" ]]; then
-      QT_HOME=$(find c:/Qt*/5.15* -maxdepth 4 -type d -path '*/msvc2019_64' | sort -V | tail -n 1)
+      QT_HOME=$(find c:/Qt*/5.15* -maxdepth 4 -type d -path '*/msvc2019_64' 2>/dev/null | sort -V | tail -n 1)
       QT_VERSION="5.15"
     fi
+  fi
+
+  # Fall back to system Qt on Linux if no SDK was found
+  if [ -z "$QT_HOME" ] && [[ "$OSTYPE" == "linux"* ]] && [ -d /usr/lib/cmake/Qt6 ]; then
+    QT_HOME=/usr
+    QT_VERSION="system"
+    export RV_USE_SYSTEM_QT=ON
+    echo "No official Qt SDK found; falling back to system Qt at $QT_HOME"
   fi
 
   if [ -n "$QT_HOME" ]; then
@@ -130,11 +147,15 @@ if [ -z "$QT_HOME" ]; then
   else
     echo "Error: $RV_VFX_PLATFORM requires a Qt $QT_VERSION installation, but none was found."
     echo "Could not find required Qt installation. Please set QT_HOME to the correct path in your environment variables."
+    echo "For distro Qt: export QT_HOME=/usr RV_USE_SYSTEM_QT=ON"
   fi
- 
+
 # Qt installation path already set
-else 
-  if [[ $QT_HOME == *"6.8"* ]]; then
+else
+  if [[ "$QT_HOME" == "/usr" || "${RV_USE_SYSTEM_QT}" == "1" || "${RV_USE_SYSTEM_QT}" == "ON" || "${RV_USE_SYSTEM_QT}" == "on" ]]; then
+    export RV_USE_SYSTEM_QT=ON
+    echo "Using system Qt at $QT_HOME (RV_USE_SYSTEM_QT=ON)"
+  elif [[ $QT_HOME == *"6.8"* ]]; then
     echo "Using Qt 6.8 installation already set at $QT_HOME"
     if [[ "$RV_VFX_PLATFORM" != "CY2026" ]]; then
         echo "Warning: QT_HOME is set to a Qt 6.8 path, but RV_VFX_PLATFORM is $RV_VFX_PLATFORM."
@@ -418,7 +439,13 @@ alias rvappdir='cd ${RV_APP_DIR}'
 alias rvhomedir='cd ${RV_HOME}'
 alias rvenv='rvhomedir && __rv_env_shell'
 alias rvsetup='rvenv && SETUPTOOLS_USE_DISTUTILS=${SETUPTOOLS_USE_DISTUTILS} python3 -m pip install --upgrade -r ${RV_HOME}/requirements.txt'
-alias rvcfg='rvhomedir && rvenv && cmake -B ${RV_BUILD_DIR} -G "${CMAKE_GENERATOR}" ${RV_TOOLCHAIN} ${CMAKE_WIN_ARCH} -DCMAKE_BUILD_TYPE=${RV_BUILD_TYPE} -DRV_DEPS_QT_LOCATION=${QT_HOME} -DRV_VFX_PLATFORM=${RV_VFX_PLATFORM} -DRV_DEPS_WIN_PERL_ROOT=${WIN_PERL}'
+# Extra cmake flags for system/distro Qt builds
+__rv_cmake_system_qt_flags() {
+  if [[ "${RV_USE_SYSTEM_QT}" == "1" || "${RV_USE_SYSTEM_QT}" == "ON" || "${RV_USE_SYSTEM_QT}" == "on" || "${QT_HOME}" == "/usr" ]]; then
+    echo "-DRV_USE_SYSTEM_QT=ON"
+  fi
+}
+alias rvcfg='rvhomedir && rvenv && cmake -B ${RV_BUILD_DIR} -G "${CMAKE_GENERATOR}" ${RV_TOOLCHAIN} ${CMAKE_WIN_ARCH} -DCMAKE_BUILD_TYPE=${RV_BUILD_TYPE} -DRV_DEPS_QT_LOCATION=${QT_HOME} -DRV_VFX_PLATFORM=${RV_VFX_PLATFORM} -DRV_DEPS_WIN_PERL_ROOT=${WIN_PERL} $(__rv_cmake_system_qt_flags)'
 alias rvbuildt='rvenv && __rv_build_with_errors'
 alias rvbuild='rvenv && rvbuildt main_executable'
 alias rvtest='rvenv && ctest --test-dir ${RV_BUILD_DIR} --extra-verbose'

@@ -43,6 +43,12 @@ ELSE()
   )
 ENDIF()
 
+# Keep sub-deps under the same base as SOURCE_DIR so configure/build paths stay consistent
+# when RV_DEPS_BASE_DIR != CMAKE_BINARY_DIR.
+SET(_imgui_deps_dir
+    ${_base_dir}/deps
+)
+
 # Download implot into a separate directory
 EXTERNALPROJECT_ADD(
   implot_download
@@ -50,7 +56,7 @@ EXTERNALPROJECT_ADD(
   GIT_TAG ${RV_DEPS_IMPLOT_TAG}
   DOWNLOAD_DIR ${RV_DEPS_DOWNLOAD_DIR}
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  SOURCE_DIR ${CMAKE_BINARY_DIR}/${_target}/deps/implot
+  SOURCE_DIR ${_imgui_deps_dir}/implot
   CONFIGURE_COMMAND ""
   BUILD_COMMAND ""
   INSTALL_COMMAND ""
@@ -71,7 +77,7 @@ EXTERNALPROJECT_ADD(
   GIT_TAG ${RV_DEPS_IMGUI_BACKEND_QT_TAG}
   DOWNLOAD_DIR ${RV_DEPS_DOWNLOAD_DIR}
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  SOURCE_DIR ${CMAKE_BINARY_DIR}/${_target}/deps/imgui-backend-qt
+  SOURCE_DIR ${_imgui_deps_dir}/imgui-backend-qt
   CONFIGURE_COMMAND ""
   BUILD_COMMAND ""
   INSTALL_COMMAND ""
@@ -87,7 +93,7 @@ EXTERNALPROJECT_ADD(
   GIT_TAG ${RV_DEPS_IMGUI_NODE_EDITOR_TAG}
   DOWNLOAD_DIR ${RV_DEPS_DOWNLOAD_DIR}
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  SOURCE_DIR ${CMAKE_BINARY_DIR}/${_target}/deps/imgui-node-editor
+  SOURCE_DIR ${_imgui_deps_dir}/imgui-node-editor
   CONFIGURE_COMMAND ""
   BUILD_COMMAND ""
   INSTALL_COMMAND ""
@@ -120,13 +126,12 @@ EXTERNALPROJECT_ADD(
   DOWNLOAD_NAME ${_target}_${_version}.zip
   DOWNLOAD_DIR ${RV_DEPS_DOWNLOAD_DIR}
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  SOURCE_DIR ${CMAKE_BINARY_DIR}/${_target}/src
+  SOURCE_DIR ${_source_dir}
   PATCH_COMMAND
-    ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/imgui/CMakeLists.txt ${CMAKE_BINARY_DIR}/${_target}/src/CMakeLists.txt && ${CMAKE_COMMAND} -E
-    copy_directory ${CMAKE_BINARY_DIR}/${_target}/deps/implot ${CMAKE_BINARY_DIR}/${_target}/src/implot && ${CMAKE_COMMAND} -E copy_directory
-    ${CMAKE_BINARY_DIR}/${_target}/deps/imgui-backend-qt/backends ${CMAKE_BINARY_DIR}/${_target}/src/backends && ${CMAKE_COMMAND} -E copy_directory
-    ${CMAKE_BINARY_DIR}/${_target}/deps/imgui-node-editor ${CMAKE_BINARY_DIR}/${_target}/src/imgui-node-editor && ${_patch_command_for_imgui_backend_qt} &&
-    ${_patch_command_for_imgui}
+    ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/imgui/CMakeLists.txt ${_source_dir}/CMakeLists.txt && ${CMAKE_COMMAND} -E copy_directory
+    ${_imgui_deps_dir}/implot ${_source_dir}/implot && ${CMAKE_COMMAND} -E copy_directory ${_imgui_deps_dir}/imgui-backend-qt/backends
+    ${_source_dir}/backends && ${CMAKE_COMMAND} -E copy_directory ${_imgui_deps_dir}/imgui-node-editor ${_source_dir}/imgui-node-editor &&
+    ${_patch_command_for_imgui_backend_qt} && ${_patch_command_for_imgui}
   CONFIGURE_COMMAND ${CMAKE_COMMAND} ${_configure_options} -DFIND_QT_VERSION=${_find_qt_version} -DCMAKE_PREFIX_PATH=${_qt_location}/lib/cmake
   BUILD_COMMAND ${_cmake_build_command}
   INSTALL_COMMAND ${_cmake_install_command}

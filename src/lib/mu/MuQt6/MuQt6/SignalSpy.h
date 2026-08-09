@@ -9,12 +9,19 @@
 #include <iostream>
 #include <Mu/FunctionObject.h>
 #include <Mu/Thread.h>
-#include <QtTest/QtTest>
+#include <QtCore/QObject>
+#include <QtCore/QMetaMethod>
+#include <QtCore/QList>
+#include <QtCore/QByteArray>
+#include <QtTest/QSignalSpy>
 
 namespace Mu
 {
 
-    class SignalSpy : public QSignalSpy
+    // Qt 6.5+ (and fully in 6.11): QSignalSpy is no longer a QObject. SignalSpy
+    // therefore inherits QObject itself and composes connection metadata that used
+    // to come from QSignalSpy's QObject base + moc.
+    class SignalSpy : public QObject
     {
         Q_OBJECT
 
@@ -45,11 +52,19 @@ namespace Mu
 
         int original_qt_metacall(QMetaObject::Call, int, void**);
 
+        // QMetaType ids for each signal parameter (replaces QSignalSpy::args).
+        const QList<int>& argMetaTypes() const { return _argMetaTypes; }
+
     private:
+        bool connectToSignal(QObject* object, const char* signal);
+
         const Function* _F;
         Process* _process;
         const CallEnvironment* _env;
         std::vector<Types> _argTypes;
+        QList<int> _argMetaTypes;
+        QByteArray _signalName;
+        QMetaObject::Connection _connection;
     };
 
 } // namespace Mu

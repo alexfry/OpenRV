@@ -127,6 +127,15 @@ SET_PROPERTY(
 OPTION(RV_DEPS_PREFER_INSTALLED "Try find_package() for dependencies before building from source" OFF)
 
 #
+# System / distro Qt (FHS layout, e.g. Arch /usr) instead of an official Qt SDK tree.
+# When ON, cmake/dependencies/qt6.cmake stages plugins/resources only and links system libQt6*.
+# Also retargets PySide to match the found system Qt major.minor when RV_DEPS_PYSIDE_VERSION
+# still points at the VFX-platform pin (see cmake/defaults/system_qt.cmake).
+#
+OPTION(RV_USE_SYSTEM_QT "Use distro/system Qt instead of an official SDK install" OFF)
+OPTION(RV_ALIGN_PYSIDE "Retarget PySide to match installed Qt (use with non-VFX Qt pins, e.g. aqt 6.11)" OFF)
+
+#
 # Version matching mode for dependency resolution.
 #
 # Controls how RV_FIND_DEPENDENCY matches versions when RV_DEPS_PREFER_INSTALLED=ON. EXACT requires the exact version specified in CY*.cmake (default,

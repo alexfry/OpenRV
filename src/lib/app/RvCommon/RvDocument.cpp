@@ -56,6 +56,8 @@
 #include <QtGui/private/qtx11extras_p.h>
 #endif
 #include <X11/Xlib.h>
+#include <cstdlib>
+#include <cstring>
 #endif
 
 #ifdef PLATFORM_DARWIN
@@ -257,21 +259,31 @@ namespace Rv
         // if (resetGLPrefs) resetGLStateAndPrefs();
 
 #ifdef PLATFORM_LINUX
-
-        int op_ret, ev_ret, er_ret;
-
-        bool haveNV = XQueryExtension(QX11Info::display(), "NV-GLX", &op_ret, &ev_ret, &er_ret);
-
-        if (!haveNV)
+        // Historical check: the proprietary NVIDIA driver used to advertise an
+        // "NV-GLX" X extension. Under XWayland that extension is almost never
+        // present even when libGLX_nvidia is active and rendering is fine, so
+        // treating a missing NV-GLX as a hard ERROR is misleading. Only emit a
+        // quiet note when neither NV-GLX nor an explicit NVIDIA GLX vendor is
+        // in play (e.g. nouveau / pure Mesa on an NVIDIA GPU).
+        if (QGuiApplication::platformName() == QLatin1String("xcb"))
         {
-            cerr << endl;
-            cerr << "ERROR:******* NV-GLX Extension Missing ***********" << endl;
-            cerr << "    If you're using an Nvidia card, please install" << endl;
-            cerr << "    the optimized NVIDIA binary driver." << endl;
-            cerr << "    If you're using an ATI card, please be aware " << endl;
-            cerr << "    that RV has not been tested with ATI cards." << endl;
-            cerr << "**************************************************" << endl;
-            cerr << endl;
+            Display* dpy = QX11Info::display();
+            if (dpy)
+            {
+                int op_ret, ev_ret, er_ret;
+                const bool haveNV = XQueryExtension(dpy, "NV-GLX", &op_ret, &ev_ret, &er_ret);
+                const char* glxVendor = getenv("__GLX_VENDOR_LIBRARY_NAME");
+                const bool nvidiaGlxForced =
+                    glxVendor && (strcmp(glxVendor, "nvidia") == 0 || strcmp(glxVendor, "NVIDIA") == 0);
+
+                if (!haveNV && !nvidiaGlxForced)
+                {
+                    // Not fatal: Mesa/AMD/Intel all work without NV-GLX.
+                    cerr << "INFO: NV-GLX X extension not present "
+                            "(normal on non-NVIDIA or XWayland)."
+                         << endl;
+                }
+            }
         }
 #endif
 
@@ -1708,10 +1720,16 @@ namespace Rv
             if (QMenu* m = a->menu())
             {
                 disconnectActions(m->actions());
-                m->disconnect();
+                // Qt 6 warns on wildcard QObject::disconnect() because it also
+                // severs internal destroyed-signal links ("QMenu::unnamed").
+                // Only disconnect the aboutToShow slot we connected in convert()
+                // / mergeMenu().
+                disconnect(m, SIGNAL(aboutToShow()), this, SLOT(aboutToShowMenu()));
             }
             else
-                a->disconnect();
+            {
+                disconnect(a, SIGNAL(triggered()), this, SLOT(menuActivated()));
+            }
         }
     }
 

@@ -80,7 +80,9 @@ IF(RV_TARGET_DARWIN)
     USES_TERMINAL_BUILD TRUE
   )
 ELSE()
-  # Linux - needs LSS header in addition to googletest
+  # Linux - needs LSS header in addition to googletest.
+  # Full `make` also builds minidump_stackwalk / microdump_stackwalk which fail to link
+  # on GCC 15+ (missing FastSourceLineResolver::Module vtable). Only build tools RV uses.
   EXTERNALPROJECT_ADD(
     ${_target}
     DOWNLOAD_NAME ${_target}_${_version}.tar.gz
@@ -94,8 +96,12 @@ ELSE()
     PATCH_COMMAND git clone https://github.com/google/googletest.git ${_source_dir}/src/testing || true
     COMMAND git clone https://chromium.googlesource.com/linux-syscall-support ${_source_dir}/src/third_party/lss || true
     CONFIGURE_COMMAND ${_source_dir}/configure --prefix=${_install_dir}
-    BUILD_COMMAND make -j${_cpu_count}
-    INSTALL_COMMAND make install
+    BUILD_COMMAND make -j${_cpu_count} src/tools/linux/dump_syms/dump_syms src/processor/minidump_dump
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${_bin_dir}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_build_dir}/src/tools/linux/dump_syms/dump_syms ${_dump_syms_tool}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_build_dir}/src/processor/minidump_dump ${_minidump_dump_tool}
+    # Placeholder so staging that expects stackwalk does not fail hard; tool is optional.
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_build_dir}/src/processor/minidump_dump ${_minidump_stackwalk_tool}
     BUILD_ALWAYS FALSE
     BUILD_BYPRODUCTS ${_dump_syms_tool} ${_minidump_stackwalk_tool} ${_minidump_dump_tool}
     USES_TERMINAL_BUILD TRUE

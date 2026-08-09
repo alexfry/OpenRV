@@ -404,4 +404,22 @@ RV_ADD_IMPORTED_LIBRARY(
   ADD_TO_DEPS_LIST
 )
 
+# OCIO's bundled minizip-ng was built against zlib-ng (zng_* symbols). The
+# installed libOpenColorIO.so leaves those unresolved; consumers must link
+# zlib-ng. Prefer the system/lib package when present.
+FIND_LIBRARY(
+  RV_ZLIB_NG_LIBRARY
+  NAMES z-ng zlib-ng
+  PATHS /usr/lib /usr/lib64
+)
+IF(RV_ZLIB_NG_LIBRARY)
+  TARGET_LINK_LIBRARIES(
+    OpenColorIO::OpenColorIO
+    INTERFACE ${RV_ZLIB_NG_LIBRARY}
+  )
+  MESSAGE(STATUS "OpenColorIO: linking zlib-ng via ${RV_ZLIB_NG_LIBRARY}")
+ELSE()
+  MESSAGE(WARNING "OpenColorIO may need zlib-ng (libz-ng) for zng_* symbols at link time")
+ENDIF()
+
 RV_STAGE_DEPENDENCY_LIBS(TARGET ${_target} TARGET_LIBS OpenColorIO::OpenColorIO)

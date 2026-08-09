@@ -26,7 +26,6 @@
 #include <Mu/ClassInstance.h>
 #include <MuLang/MuLangContext.h>
 #include <MuLang/StringType.h>
-// #include <MuQt6/qtModuleIncludes.h>
 #include <MuQt6/qtUtils.h>
 #include <MuQt6/QObjectType.h>
 #include <MuQt6/QWidgetType.h>
@@ -42,16 +41,14 @@
 #include <MuQt6/QPointType.h>
 #include <MuQt6/QRectType.h>
 #include <MuQt6/QItemSelectionType.h>
-#define private public
 #include <MuQt6/SignalSpy.h>
-#undef private
 
 namespace Mu
 {
     using namespace std;
 
     SignalSpy::SignalSpy(QObject* o, const char* sig, const Function* F, Process* p)
-        : QSignalSpy(o, sig)
+        : QObject(nullptr)
         , _F(F)
         , _process(p)
         , _env(p->callEnv())
@@ -91,27 +88,27 @@ namespace Mu
                 _argTypes[i] = BoolArg;
             else if (F->argType(i) == ctype)
                 _argTypes[i] = ColorArg;
-            else if (const Class* c = dynamic_cast<const Class*>(F->argType(i)))
+            else if (const Class* cl = dynamic_cast<const Class*>(F->argType(i)))
             {
-                if (c == ptype)
+                if (cl == ptype)
                     _argTypes[i] = PointArg;
-                else if (c == twtype)
+                else if (cl == twtype)
                     _argTypes[i] = TreeItemArg;
-                else if (c == tbtype)
+                else if (cl == tbtype)
                     _argTypes[i] = TableItemArg;
-                else if (c == lwtype)
+                else if (cl == lwtype)
                     _argTypes[i] = ListItemArg;
-                else if (c == sitype)
+                else if (cl == sitype)
                     _argTypes[i] = StandardItemArg;
-                else if (c == mitype)
+                else if (cl == mitype)
                     _argTypes[i] = ModelIndexArg;
-                else if (c == istype)
+                else if (cl == istype)
                     _argTypes[i] = ItemSelectionArg;
-                else if (c == utype)
+                else if (cl == utype)
                     _argTypes[i] = UrlArg;
-                else if (c == vtype)
+                else if (cl == vtype)
                     _argTypes[i] = VariantArg;
-                else if (c->isA(otype))
+                else if (cl->isA(otype))
                     _argTypes[i] = ObjectArg;
                 else
                 {
@@ -128,12 +125,55 @@ namespace Mu
                 cout << "WARNING: " << sig << " not translated correctly" << endl;
             }
         }
+
+        if (!connectToSignal(o, sig))
+        {
+            cout << "WARNING: SignalSpy failed to connect to signal " << (sig ? sig : "(null)") << endl;
+        }
     }
 
-    SignalSpy::~SignalSpy() { _F = 0; }
+    bool SignalSpy::connectToSignal(QObject* object, const char* signal)
+    {
+        if (!object || !signal)
+            return false;
+
+        // Accept both "2signal(...)" (SIGNAL macro) and bare "signal(...)" forms.
+        QByteArray sig = QMetaObject::normalizedSignature(signal[0] >= '0' && signal[0] <= '9' ? signal + 1 : signal);
+        _signalName = sig;
+
+        const int signalIndex = object->metaObject()->indexOfSignal(sig.constData());
+        if (signalIndex < 0)
+        {
+            cout << "WARNING: SignalSpy: no such signal " << sig.constData() << " on "
+                 << object->metaObject()->className() << endl;
+            return false;
+        }
+
+        const QMetaMethod method = object->metaObject()->method(signalIndex);
+        _argMetaTypes.clear();
+        for (int i = 0; i < method.parameterCount(); ++i)
+            _argMetaTypes.append(method.parameterType(i));
+
+        // Connect sender signal -> this object's "virtual" slot at methodCount().
+        // That routes emissions into our qt_metacall override (same pattern as
+        // the pre-Qt-6.5 QSignalSpy QObject implementation).
+        const int slotIndex = metaObject()->methodCount();
+        return QMetaObject::connect(object, signalIndex, this, slotIndex, Qt::DirectConnection, nullptr);
+    }
+
+    SignalSpy::~SignalSpy()
+    {
+        if (_connection)
+            QObject::disconnect(_connection);
+        _F = 0;
+    }
 
     int SignalSpy::qt_metacall(QMetaObject::Call call, int methodId, void** a)
     {
+        methodId = QObject::qt_metacall(call, methodId, a);
+        if (methodId < 0)
+            return methodId;
+
         if (call == QMetaObject::InvokeMetaMethod)
         {
             Function::ArgumentVector args(_argTypes.size());
@@ -142,9 +182,6 @@ namespace Mu
 
             for (size_t i = 0; i < _argTypes.size(); i++)
             {
-                // QMetaType type = QMetaType(this->args.at(i));
-                // cout << "type = " << QMetaType::typeName(type) << endl;
-
                 switch (_argTypes[i])
                 {
                 case IntArg:
@@ -199,7 +236,7 @@ namespace Mu
 
                 case TreeItemArg:
                 {
-                    QMetaType type = QMetaType(this->args.at(i));
+                    QMetaType type = QMetaType(_argMetaTypes.value(static_cast<int>(i)));
                     QVariant v(type, a[i + 1]);
                     QTreeWidgetItem* o = v.value<QTreeWidgetItem*>();
                     args[i]._Pointer = !o ? NULL : makeqpointer<QTreeWidgetItemType>((QTreeWidgetItemType*)_F->argType(i), o);
@@ -208,7 +245,7 @@ namespace Mu
 
                 case TableItemArg:
                 {
-                    QMetaType type = QMetaType(this->args.at(i));
+                    QMetaType type = QMetaType(_argMetaTypes.value(static_cast<int>(i)));
                     QVariant v(type, a[i + 1]);
                     QTableWidgetItem* o = v.value<QTableWidgetItem*>();
                     args[i]._Pointer = !o ? NULL : makeqpointer<QTableWidgetItemType>((QTableWidgetItemType*)_F->argType(i), o);
@@ -217,7 +254,7 @@ namespace Mu
 
                 case ListItemArg:
                 {
-                    QMetaType type = QMetaType(this->args.at(i));
+                    QMetaType type = QMetaType(_argMetaTypes.value(static_cast<int>(i)));
                     QVariant v(type, a[i + 1]);
                     QListWidgetItem* o = v.value<QListWidgetItem*>();
                     args[i]._Pointer = !o ? NULL : makeqpointer<QListWidgetItemType>((QListWidgetItemType*)_F->argType(i), o);
@@ -226,7 +263,7 @@ namespace Mu
 
                 case StandardItemArg:
                 {
-                    QMetaType type = QMetaType(this->args.at(i));
+                    QMetaType type = QMetaType(_argMetaTypes.value(static_cast<int>(i)));
                     QVariant v(type, a[i + 1]);
                     QStandardItem* o = v.value<QStandardItem*>();
                     args[i]._Pointer = !o ? NULL : makeqpointer<QStandardItemType>((QStandardItemType*)_F->argType(i), o);
@@ -235,7 +272,7 @@ namespace Mu
 
                 case ModelIndexArg:
                 {
-                    QMetaType type = QMetaType(this->args.at(i));
+                    QMetaType type = QMetaType(_argMetaTypes.value(static_cast<int>(i)));
                     QVariant v(type, a[i + 1]);
                     QModelIndex o = v.value<QModelIndex>();
                     args[i]._Pointer = makeqtype<QModelIndexType>((Context*)c, o, "qt.QModelIndex");
@@ -244,7 +281,7 @@ namespace Mu
 
                 case ItemSelectionArg:
                 {
-                    QMetaType type = QMetaType(this->args.at(i));
+                    QMetaType type = QMetaType(_argMetaTypes.value(static_cast<int>(i)));
                     QVariant v(type, a[i + 1]);
                     QItemSelection o = v.value<QItemSelection>();
                     args[i]._Pointer = makeqtype<QItemSelectionType>((Context*)c, o, "qt.QItemSelection");
@@ -271,12 +308,14 @@ namespace Mu
                 _process->call(thread, _F, args);
                 _process->releaseApplicationThread(thread);
             }
+
+            return methodId - 1;
         }
 
         return methodId;
     }
 
-//  hijack qt_metacall by using a filtered version of the moc file
-//  that has the function renamed to original_qt_metacall
+//  Use filtered moc so the generated qt_metacall is named original_qt_metacall
+//  (kept for ABI compatibility with the filter script). Our qt_metacall above is used.
 #include <MuQt6/generated/moc_SignalSpy_filtered.hpp>
 } // namespace Mu

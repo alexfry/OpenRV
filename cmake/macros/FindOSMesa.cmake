@@ -70,5 +70,51 @@ IF(OSMesa_FOUND)
       PROPERTIES IMPORTED_LOCATION "${OSMESA_LIBRARY}"
                  INTERFACE_INCLUDE_DIRECTORIES "${OSMESA_INCLUDE_DIR}"
     )
+    # Fedora-packaged libOSMesa needs libglapi + a matching libLLVM (e.g. 18.1).
+    # Search beside OSMESA_ROOT and on the system so Arch hosts can stage them.
+    SET(_osmesa_search_lib_dirs "")
+    IF(OSMESA_ROOT)
+      LIST(APPEND _osmesa_search_lib_dirs "${OSMESA_ROOT}/lib" "${OSMESA_ROOT}/lib64")
+    ENDIF()
+    IF(DEFINED ENV{OSMESA_ROOT})
+      LIST(APPEND _osmesa_search_lib_dirs "$ENV{OSMESA_ROOT}/lib" "$ENV{OSMESA_ROOT}/lib64")
+    ENDIF()
+    LIST(APPEND _osmesa_search_lib_dirs /usr/lib /usr/lib64 /usr/lib/llvm18/lib)
+
+    FIND_LIBRARY(
+      OSMESA_GLAPI_LIBRARY
+      NAMES glapi
+      PATHS ${_osmesa_search_lib_dirs}
+      NO_DEFAULT_PATH
+    )
+    IF(NOT OSMESA_GLAPI_LIBRARY)
+      FIND_LIBRARY(OSMESA_GLAPI_LIBRARY NAMES glapi)
+    ENDIF()
+
+    FIND_LIBRARY(
+      OSMESA_LLVM_LIBRARY
+      NAMES LLVM-18.1 LLVM.so.18.1 LLVM
+      PATHS ${_osmesa_search_lib_dirs}
+      NO_DEFAULT_PATH
+    )
+    IF(NOT OSMESA_LLVM_LIBRARY)
+      FIND_LIBRARY(OSMESA_LLVM_LIBRARY NAMES LLVM-18.1 LLVM)
+    ENDIF()
+
+    SET(_osmesa_iface_libs "")
+    IF(OSMESA_GLAPI_LIBRARY)
+      LIST(APPEND _osmesa_iface_libs "${OSMESA_GLAPI_LIBRARY}")
+    ENDIF()
+    IF(OSMESA_LLVM_LIBRARY)
+      LIST(APPEND _osmesa_iface_libs "${OSMESA_LLVM_LIBRARY}")
+    ENDIF()
+    IF(_osmesa_iface_libs)
+      SET_PROPERTY(
+        TARGET OSMesa::OSMesa
+        APPEND
+        PROPERTY INTERFACE_LINK_LIBRARIES ${_osmesa_iface_libs}
+      )
+      MESSAGE(STATUS "OSMesa: also linking ${_osmesa_iface_libs}")
+    ENDIF()
   ENDIF()
 ENDIF()

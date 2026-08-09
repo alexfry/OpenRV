@@ -162,21 +162,33 @@ def prepare() -> None:
 
     # Note: numpy is now installed via requirements.txt in python3.cmake before PySide6 builds.
 
-    cmakelist_path = os.path.join(SOURCE_DIR, "sources", "shiboken6", "ApiExtractor", "CMakeLists.txt")
-    old_cmakelist_path = os.path.join(SOURCE_DIR, "sources", "shiboken6", "ApiExtractor", "CMakeLists.txt.old")
-    if os.path.exists(old_cmakelist_path):
-        os.remove(old_cmakelist_path)
+    # Disable libxslt in ApiExtractor when present. Layout changed across PySide versions:
+    #   older: sources/shiboken6/ApiExtractor/CMakeLists.txt
+    #   6.11+: sources/shiboken6_generator/ApiExtractor/CMakeLists.txt
+    cmakelist_candidates = [
+        os.path.join(SOURCE_DIR, "sources", "shiboken6", "ApiExtractor", "CMakeLists.txt"),
+        os.path.join(SOURCE_DIR, "sources", "shiboken6_generator", "ApiExtractor", "CMakeLists.txt"),
+        os.path.join(SOURCE_DIR, "shiboken6", "ApiExtractor", "CMakeLists.txt"),
+        os.path.join(SOURCE_DIR, "shiboken6_generator", "ApiExtractor", "CMakeLists.txt"),
+    ]
+    cmakelist_path = next((p for p in cmakelist_candidates if os.path.exists(p)), None)
+    if cmakelist_path is None:
+        print("WARNING: ApiExtractor CMakeLists.txt not found; skipping libxslt patch")
+    else:
+        old_cmakelist_path = cmakelist_path + ".old"
+        if os.path.exists(old_cmakelist_path):
+            os.remove(old_cmakelist_path)
 
-    os.rename(cmakelist_path, old_cmakelist_path)
-    with open(old_cmakelist_path) as old_cmakelist:
-        with open(cmakelist_path, "w") as cmakelist:
-            for line in old_cmakelist:
-                new_line = line.replace(
-                    " set(HAS_LIBXSLT 1)",
-                    " #set(HAS_LIBXSLT 1)",
-                )
-
-                cmakelist.write(new_line)
+        os.rename(cmakelist_path, old_cmakelist_path)
+        with open(old_cmakelist_path) as old_cmakelist:
+            with open(cmakelist_path, "w") as cmakelist:
+                for line in old_cmakelist:
+                    new_line = line.replace(
+                        " set(HAS_LIBXSLT 1)",
+                        " #set(HAS_LIBXSLT 1)",
+                    )
+                    cmakelist.write(new_line)
+        print(f"Patched libxslt flag in {cmakelist_path}")
 
 
 def remove_broken_shortcuts(python_home: str) -> None:
@@ -213,6 +225,35 @@ def remove_broken_shortcuts(python_home: str) -> None:
                 print(f"Keeping {filepath}...")
 
 
+def find_qtpaths(qt_dir: str) -> str:
+    """
+    Locate qtpaths for either an official Qt SDK tree or a system/FHS install.
+
+    SDK layout:  ${qt_dir}/bin/qtpaths
+    Arch/FHS:    ${qt_dir}/lib/qt6/bin/qtpaths{,6}  or  ${qt_dir}/bin/qtpaths6
+    """
+    exe = "qtpaths.exe" if platform.system() == "Windows" else "qtpaths"
+    candidates = [
+        os.path.join(qt_dir, "bin", exe),
+        os.path.join(qt_dir, "bin", "qtpaths6"),
+        os.path.join(qt_dir, "lib", "qt6", "bin", "qtpaths"),
+        os.path.join(qt_dir, "lib", "qt6", "bin", "qtpaths6"),
+        os.path.join(qt_dir, "libexec", "qtpaths"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    # Fall back to PATH (e.g. distro qtpaths6)
+    for name in ("qtpaths", "qtpaths6"):
+        found = shutil.which(name)
+        if found:
+            return found
+    raise FileNotFoundError(
+        f"Could not find qtpaths under {qt_dir} or on PATH. "
+        "For system Qt on Arch, install qt6-base (provides /usr/lib/qt6/bin/qtpaths)."
+    )
+
+
 def build() -> None:
     """
     Run the build step of the build. It compile every target of the project.
@@ -220,10 +261,13 @@ def build() -> None:
     python_home = PYTHON_OUTPUT_DIR
     python_interpreter_args = get_python_interpreter_args(python_home, VARIANT)
 
+    qtpaths = find_qtpaths(QT_OUTPUT_DIR)
+    print(f"Using qtpaths: {qtpaths}")
+
     pyside_build_args = python_interpreter_args + [
         os.path.join(SOURCE_DIR, "setup.py"),
         "install",
-        f"--qtpaths={os.path.join(QT_OUTPUT_DIR, 'bin', 'qtpaths' + ('.exe' if platform.system() == 'Windows' else ''))}",
+        f"--qtpaths={qtpaths}",
         "--ignore-git",
         "--standalone",
         "--verbose",

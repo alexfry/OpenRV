@@ -738,7 +738,13 @@ class OCIOSourceSetupMode(rvtypes.MinorMode):
                 self.config = OCIO.Config.CreateFromFile(config)
                 OCIO.SetCurrentConfig(self.config)
             else:
-                print("WARNING: $OCIO environment variable unset!")
+                # Not an error: linear/raw display still works. Point OCIO at a
+                # config (e.g. ACES) when you need color-managed viewing.
+                print(
+                    "INFO: $OCIO unset and no saved OCIO config — "
+                    "color management inactive. Set OCIO=/path/to/config.ocio "
+                    "for ACES/OCIO display transforms."
+                )
 
         self.init(
             "OCIO Source Setup",

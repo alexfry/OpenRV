@@ -433,8 +433,11 @@ IF(RV_TARGET_LINUX)
         Qt::X11Extras
     )
   ELSEIF(RV_VFX_PLATFORM STRGREATER_EQUAL CY2024)
+    # Qt 6.5+ exposes private X11 helpers via Qt::GuiPrivate (not via COMPONENTS Gui alone).
+    # Request GuiPrivate explicitly so the imported target is created (required by Qt 6.8+/6.11).
     SET(_rvcommon_qt_components
         Gui
+        GuiPrivate
     )
     SET(_rvcommon_link_libraries
         Qt::GuiPrivate

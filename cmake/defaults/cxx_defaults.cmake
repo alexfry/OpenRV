@@ -71,6 +71,9 @@ INCLUDE(rv_generate_symbols)
 # Note that the macro in rv_vfx.cmake are dependant on those RV_VFX_CY20XX.
 INCLUDE(${RV_VFX_PLATFORM})
 
+# When using distro/system Qt, retarget PySide (and Qt version pin) after the CY platform defaults.
+INCLUDE(system_qt)
+
 IF(RV_VFX_PLATFORM STRGREATER_EQUAL "CY2024")
   SET(RV_QT_PACKAGE_NAME
       "Qt6"
