@@ -198,7 +198,43 @@ LIST(APPEND _configure_options "-DOCIO_BUILD_APPS=OFF")
 # with system libs; typical CI pulls in Imath/OpenEXR components, yaml-cpp, pystring, expat, lcms2, zlib, and related OCIO external packages.
 LIST(APPEND _configure_options "-DOCIO_INSTALL_EXT_PACKAGES=MISSING")
 
+# yaml-cpp 0.8.0 (vendored by OCIO 2.5.x) fails on newer libstdc++ without <cstdint>
+# for uint16_t/uint32_t in emitterutils.cpp. Force-include for the whole OCIO tree.
 IF(NOT RV_TARGET_WINDOWS)
+  LIST(APPEND _configure_options "-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS} -include cstdint")
+ENDIF()
+
+IF(NOT RV_TARGET_WINDOWS)
+  # OCIO's minizip-ng pulls zng_* symbols but does not always DT_NEEDED libz-ng.
+  # After install, add the NEEDED entry so dlopen (PyOpenColorIO) resolves them.
+  FIND_PROGRAM(RV_PATCHELF_EXECUTABLE patchelf)
+  SET(_ocio_install_commands
+      ${_cmake_install_command}
+  )
+  IF(RV_PATCHELF_EXECUTABLE)
+    SET(_ocio_so
+        "${_install_dir}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}OpenColorIO${CMAKE_SHARED_LIBRARY_SUFFIX}.${RV_DEPS_OCIO_VERSION}"
+    )
+    # Also match lib64 installs
+    SET(_ocio_so_lib64
+        "${_install_dir}/lib64/${CMAKE_SHARED_LIBRARY_PREFIX}OpenColorIO${CMAKE_SHARED_LIBRARY_SUFFIX}.${RV_DEPS_OCIO_VERSION}"
+    )
+    LIST(
+      APPEND
+      _ocio_install_commands
+      COMMAND
+      ${CMAKE_COMMAND}
+      -E
+      env
+      "OCIO_SO=${_ocio_so}"
+      "OCIO_SO64=${_ocio_so_lib64}"
+      "PATCHELF=${RV_PATCHELF_EXECUTABLE}"
+      ${CMAKE_COMMAND}
+      -P
+      ${CMAKE_CURRENT_LIST_DIR}/ocio_patchelf_zng.cmake
+    )
+  ENDIF()
+
   EXTERNALPROJECT_ADD(
     ${_target}
     URL ${_download_url}
@@ -212,7 +248,7 @@ IF(NOT RV_TARGET_WINDOWS)
     DEPENDS Boost::headers RV_DEPS_PYTHON3 Imath::Imath ZLIB::ZLIB
     CONFIGURE_COMMAND ${CMAKE_COMMAND} ${_configure_options}
     BUILD_COMMAND ${_cmake_build_command}
-    INSTALL_COMMAND ${_cmake_install_command}
+    INSTALL_COMMAND ${_ocio_install_commands}
     BUILD_IN_SOURCE FALSE
     BUILD_ALWAYS FALSE
     BUILD_BYPRODUCTS ${_byproducts}

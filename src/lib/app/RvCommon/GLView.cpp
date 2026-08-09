@@ -34,9 +34,17 @@
 #include <QResizeEvent>
 #include <QMoveEvent>
 #include <QTimer>
+#include <QMouseEvent>
+#include <QWheelEvent>
+#include <QCoreApplication>
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+
+#ifndef GL_RGBA16F
+#define GL_RGBA16F 0x881A
+#endif
 
 namespace Rv
 {
@@ -315,6 +323,16 @@ namespace Rv
         if (!present)
             return;
         m_presentOverlay = present;
+        // Ensure the overlay never steals image-area input (pan, grade, scrub).
+        m_presentOverlay->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        m_presentOverlay->setFocusPolicy(Qt::NoFocus);
+        for (QWidget* w : m_presentOverlay->findChildren<QWidget*>())
+        {
+            w->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            w->setFocusPolicy(Qt::NoFocus);
+        }
+        // Backup: if the native present surface still gets events, forward them.
+        m_presentOverlay->installEventFilter(this);
         if (auto* vk = qobject_cast<VulkanPresentWidget*>(present))
         {
             vk->setHdrPresent(wantHdrDisplay());
@@ -325,6 +343,8 @@ namespace Rv
         syncPresentOverlayGeometry();
         m_presentOverlay->show();
         m_presentOverlay->raise();
+        // Keep keyboard/mouse focus on the GL view for RV tools.
+        setFocus(Qt::OtherFocusReason);
     }
 
     QSize GLView::sizeHint() const { return m_csize; }
@@ -598,42 +618,107 @@ namespace Rv
             m_presentOverlay->show();
     }
 
+    bool GLView::needsFloatPresentTransfer() const
+    {
+        return VulkanPresentWidget::presentModeNeedsFloatTransfer()
+               && qobject_cast<VulkanPresentWidget*>(m_presentOverlay) != nullptr;
+    }
+
+    GLuint GLView::presentFramebufferObject() const
+    {
+        if (m_floatPresentFbo && needsFloatPresentTransfer())
+            return m_floatPresentFbo->handle();
+        return defaultFramebufferObject();
+    }
+
+    void GLView::ensureFloatPresentFbo(const QSize& pixelSize)
+    {
+        if (!needsFloatPresentTransfer() || !pixelSize.isValid())
+        {
+            m_floatPresentFbo.reset();
+            return;
+        }
+        if (m_floatPresentFbo && m_floatPresentFbo->size() == pixelSize)
+            return;
+
+        QOpenGLFramebufferObjectFormat fmt;
+        fmt.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
+        // 16F is enough for EDR headroom; render still uses scene/display linear
+        // or gamma-encoded P3 Extended values that may exceed 1.0.
+        fmt.setInternalTextureFormat(GL_RGBA16F);
+        fmt.setSamples(0);
+        m_floatPresentFbo = std::make_unique<QOpenGLFramebufferObject>(pixelSize, fmt);
+        if (!m_floatPresentFbo->isValid())
+        {
+            cerr << "ERROR: float present FBO (RGBA16F) failed; falling back to 8-bit grab" << endl;
+            m_floatPresentFbo.reset();
+            return;
+        }
+        static bool once = false;
+        if (!once)
+        {
+            once = true;
+            cout << "INFO: GL float present FBO RGBA16F " << pixelSize.width() << "x" << pixelSize.height()
+                 << " (p3extended EDR transfer)" << endl;
+        }
+    }
+
     void GLView::updateCpuPresentFallback()
+    {
+        presentExternalFrame();
+    }
+
+    void GLView::presentExternalFrame()
     {
         if (!m_presentOverlay)
             return;
 
-        // Avoid re-entrant paintGL if the overlay update schedules a parent repaint.
         static bool s_inPresent = false;
         if (s_inPresent)
             return;
         s_inPresent = true;
 
-        // Must be called with the widget FBO current (end of paintGL).
-        // Returns top-left-origin device pixels (Qt already flips GL bottom-up).
+        syncPresentOverlayGeometry();
+        if (!m_presentOverlay->isVisible())
+            m_presentOverlay->show();
+
+        auto* vk = qobject_cast<VulkanPresentWidget*>(m_presentOverlay);
+
+        // Float transfer for p3extended: read RGBA16F FBO (preserves >1.0).
+        // Leave bottom-up; Vulkan present flips V on the GPU (no CPU flip/scale).
+        if (vk && m_floatPresentFbo && m_floatPresentFbo->isValid() && needsFloatPresentTransfer())
+        {
+            const int w = m_floatPresentFbo->width();
+            const int h = m_floatPresentFbo->height();
+            std::vector<float> pixels(size_t(w) * size_t(h) * 4);
+            m_floatPresentFbo->bind();
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, w, h, GL_RGBA, GL_FLOAT, pixels.data());
+            m_floatPresentFbo->release();
+
+            QTimer::singleShot(0, vk, [vk, w, h, data = std::move(pixels)]() mutable {
+                vk->setFrameFloat(w, h, std::move(data));
+            });
+            s_inPresent = false;
+            return;
+        }
+
+        // 8-bit path (PQ and non-float modes).
         QImage img = grabFramebuffer();
         if (img.isNull())
         {
             s_inPresent = false;
             return;
         }
-        // Pixel buffer is already device-resolution; clear DPR so present path
-        // does not interpret the image as "logical size × dpr" a second time.
         img.setDevicePixelRatio(1.0);
 
-        syncPresentOverlayGeometry();
-        if (!m_presentOverlay->isVisible())
-            m_presentOverlay->show();
-
-        // Defer setFrame/update to after paintGL returns so we do not recurse
-        // into QOpenGLWidget paint via the child widget's update().
-        if (auto* vk = qobject_cast<VulkanPresentWidget*>(m_presentOverlay))
+        if (vk)
         {
             QTimer::singleShot(0, vk, [vk, img = std::move(img)]() mutable { vk->setFrame(std::move(img)); });
         }
         else if (auto* overlay = dynamic_cast<PresentOverlay*>(m_presentOverlay))
         {
-            // QPainter drawImage(rect, img) with dpr=1 + logical rect is correct.
             QTimer::singleShot(0, overlay, [overlay, img = std::move(img)]() mutable {
                 overlay->setFrame(std::move(img));
             });
@@ -682,13 +767,18 @@ namespace Rv
 #endif
 #endif
 
-        // Always bind the widget FBO and start from opaque black. On Wayland,
-        // a zero alpha channel makes the plane show the desktop (not "empty
-        // black") after Qt composites the QOpenGLWidget texture.
-        GLuint widgetFbo = defaultFramebufferObject();
-        if (QOpenGLContext::currentContext())
-            widgetFbo = QOpenGLContext::currentContext()->defaultFramebufferObject();
-        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, widgetFbo);
+        // Bind present target: float FBO for p3extended (EDR >1), else widget FBO.
+        // On Wayland a zero alpha makes the plane show the desktop after composite.
+        const QSize pixelSize(std::max(1, int(std::lround(width() * devicePixelRatioF()))),
+                              std::max(1, int(std::lround(height() * devicePixelRatioF()))));
+        ensureFloatPresentFbo(pixelSize);
+
+        GLuint targetFbo = presentFramebufferObject();
+        if (targetFbo == 0 && QOpenGLContext::currentContext())
+            targetFbo = QOpenGLContext::currentContext()->defaultFramebufferObject();
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, targetFbo);
+        TWK_GLDEBUG;
+        glViewport(0, 0, pixelSize.width(), pixelSize.height());
         TWK_GLDEBUG;
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         TWK_GLDEBUG;
@@ -1106,6 +1196,55 @@ namespace Rv
 
     bool GLView::eventFilter(QObject* object, QEvent* event)
     {
+        // Forward image-area input that landed on the present overlay/native
+        // container so pan, E+drag, playhead, etc. still hit GLView/translator.
+        if (m_presentOverlay
+            && (object == m_presentOverlay || m_presentOverlay->isAncestorOf(qobject_cast<QWidget*>(object))))
+        {
+            switch (event->type())
+            {
+            case QEvent::MouseButtonPress:
+            case QEvent::MouseButtonRelease:
+            case QEvent::MouseButtonDblClick:
+            case QEvent::MouseMove:
+            case QEvent::Wheel:
+            case QEvent::HoverMove:
+            case QEvent::HoverEnter:
+            case QEvent::HoverLeave:
+            case QEvent::TabletPress:
+            case QEvent::TabletRelease:
+            case QEvent::TabletMove:
+            case QEvent::NativeGesture:
+            case QEvent::TouchBegin:
+            case QEvent::TouchUpdate:
+            case QEvent::TouchEnd:
+            {
+                // Map to GLView local coords and redeliver.
+                if (auto* me = dynamic_cast<QMouseEvent*>(event))
+                {
+                    const QPointF local = mapFromGlobal(me->globalPosition());
+                    QMouseEvent copy(me->type(), local, me->globalPosition(), me->scenePosition(), me->button(),
+                                     me->buttons(), me->modifiers(), me->source());
+                    QCoreApplication::sendEvent(this, &copy);
+                    return true;
+                }
+                if (auto* we = dynamic_cast<QWheelEvent*>(event))
+                {
+                    const QPointF local = mapFromGlobal(we->globalPosition());
+                    QWheelEvent copy(local, we->globalPosition(), we->pixelDelta(), we->angleDelta(), we->buttons(),
+                                     we->modifiers(), we->phase(), we->inverted(), we->source());
+                    QCoreApplication::sendEvent(this, &copy);
+                    return true;
+                }
+                // Other pointer-like events: try as-is on this view.
+                QCoreApplication::sendEvent(this, event);
+                return true;
+            }
+            default:
+                break;
+            }
+        }
+
         if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease || event->type() == QEvent::Shortcut
             || event->type() == QEvent::ShortcutOverride)
         {

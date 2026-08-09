@@ -41,14 +41,16 @@ IF(RV_VFX_PLATFORM STREQUAL "CY2025")
   )
 
   # OCIO https://github.com/AcademySoftwareFoundation/OpenColorIO
+  # 2.5.x required for built-in ACES 2.0 configs (studio/cg-config … aces-v2.0 …).
+  # Stay on CY2025 for everything else; only this pin is above the 2025 VFX platform.
   SET(RV_DEPS_OCIO_VERSION
-      "2.4.2"
+      "2.5.2"
   )
   SET(RV_DEPS_OCIO_VERSION_SHORT
-      "2_4"
+      "2_5"
   )
   SET(RV_DEPS_OCIO_DOWNLOAD_HASH
-      "1bc8f31a1479ce6518644cdd7df26631"
+      "5ad02299def485e65abb4199bb04bc58"
   )
 
   # OpenEXR https://github.com/AcademySoftwareFoundation/openexr/releases

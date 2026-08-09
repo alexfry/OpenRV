@@ -12,6 +12,7 @@
 #include <QImage>
 #include <QWindow>
 #include <memory>
+#include <vector>
 
 class QRhi;
 class QRhiTexture;
@@ -34,9 +35,23 @@ namespace Rv
         explicit VulkanPresentWindow();
         ~VulkanPresentWindow() override;
 
+        // RV_HDR_PRESENT: pq | p3linear | srgblinear | p3extended
+        enum class PresentMode
+        {
+            Pq = 0,         // HDR10 ST.2084 (default)
+            P3Linear = 1,   // HDRExtendedDisplayP3Linear; buffer assumed PQ codes
+            SrgbLinear = 2, // HDRExtendedSrgbLinear; buffer assumed PQ codes
+            P3Extended = 3  // P3 linear surface; buffer is P3 + piecewise sRGB TF (macOS EDR)
+        };
+
         void setFrame(QImage img);
+        // Float RGBA (top-left origin), for p3extended / EDR headroom.
+        void setFrameFloat(int width, int height, std::vector<float> rgba);
         void setHdrPresent(bool enabled);
         bool hdrPresent() const { return m_hdr; }
+        PresentMode presentMode() const { return m_presentMode; }
+        // True when the present path requires float transfer (p3extended).
+        static bool presentModeNeedsFloatTransfer();
 
     protected:
         void exposeEvent(QExposeEvent*) override;
@@ -46,17 +61,33 @@ namespace Rv
     private:
         void initRhi();
         void releaseRhi();
-        void ensureTexture(const QSize& pixelSize);
+        void ensureTexture(const QSize& pixelSize, bool asFloat);
         void ensurePipeline();
         void renderFrame();
         bool ensureSwapChain();
         void selectSwapChainFormat();
+        static PresentMode presentModeFromEnv();
+        // Compositor SDR white in nits (swapchain / env / 203).
+        float resolveSdrWhiteNits() const;
+        // Fragment mode: 0 pass, 1 PQ×scale, 2 PQ→linear, 3 sRGB-TF→linear P3
+        int presentShaderMode() const;
+        float pqSdrWhiteScale() const;
+        // After linearization, boost so content 1.0 matches compositor SDR white.
+        float linearSdrWhiteMatchScale() const;
 
         QImage m_pending;
         bool m_hasPending = false;
+        std::vector<float> m_pendingFloat;
+        int m_pendingFloatW = 0;
+        int m_pendingFloatH = 0;
+        bool m_hasPendingFloat = false;
+        bool m_texIsFloat = false;
         bool m_hdr = false;
         bool m_running = false;
         int m_swapchainFormat = 0; // QRhiSwapChain::Format as int
+        PresentMode m_presentMode = PresentMode::Pq;
+        // From QRhiSwapChainHdrInfo when available; else env / 203 default.
+        float m_sdrWhiteLevelNits = 0.f;
 
         QVulkanInstance* m_inst = nullptr;
         QRhi* m_rhi = nullptr;
@@ -83,9 +114,14 @@ namespace Rv
         ~VulkanPresentWidget() override;
 
         void setFrame(QImage img);
+        void setFrameFloat(int width, int height, std::vector<float> rgba);
         void setHdrPresent(bool enabled);
         bool hdrPresent() const;
         VulkanPresentWindow* presentWindow() const { return m_window; }
+        static bool presentModeNeedsFloatTransfer()
+        {
+            return VulkanPresentWindow::presentModeNeedsFloatTransfer();
+        }
 
     private:
         VulkanPresentWindow* m_window = nullptr;

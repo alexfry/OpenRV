@@ -15,8 +15,11 @@
 #include <QtCore/QEvent>
 #include <QtCore/QTimer>
 #include <QImage>
+#include <QOpenGLFramebufferObject>
 #include <TwkUtil/Timer.h>
 #include <boost/thread/thread.hpp>
+#include <memory>
+#include <vector>
 
 class QWidget;
 
@@ -75,6 +78,11 @@ namespace Rv
         // Does not take ownership if parented elsewhere.
         void setExternalPresentWidget(QWidget* present);
 
+        // FBO the video device should render into (float present FBO or widget).
+        GLuint presentFramebufferObject() const;
+        // p3extended (and similar) need float render + transfer for EDR >1.
+        bool needsFloatPresentTransfer() const;
+
     public slots:
         void eventProcessingTimeout();
 
@@ -88,6 +96,8 @@ namespace Rv
         void debugSaveFramebuffer();
         void updateCpuPresentFallback();
         void syncPresentOverlayGeometry();
+        void ensureFloatPresentFbo(const QSize& pixelSize);
+        void presentExternalFrame();
 
     private:
         RvDocument* m_doc;
@@ -115,6 +125,8 @@ namespace Rv
         // Child QWidget that paints grabFramebuffer() when Qt's Wayland GL
         // composite path leaves the QOpenGLWidget blank (NVIDIA/Hyprland).
         QWidget* m_presentOverlay;
+        // RGBA16F (or 32F) FBO for p3extended float transfer; null when unused.
+        std::unique_ptr<QOpenGLFramebufferObject> m_floatPresentFbo;
     };
 
 } // namespace Rv

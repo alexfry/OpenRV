@@ -20,8 +20,12 @@
 #include <QSurfaceFormat>
 #include <QVulkanInstance>
 #include <QVBoxLayout>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
+#include <strings.h> // strcasecmp
 
 #include "shaders/present_vert_qsb.h"
 #include "shaders/present_frag_qsb.h"
@@ -44,6 +48,42 @@ namespace Rv
             {-1.f, -1.f, 0.f, 1.f}, // bottom-left
             {1.f, -1.f, 1.f, 1.f},  // bottom-right
         };
+
+        // RV_HDR_PQ_SDR_SCALE=1 enables PQ→linear→×s→PQ on the PQ present path.
+        bool wantPqSdrWhiteScale()
+        {
+            const char* e = getenv("RV_HDR_PQ_SDR_SCALE");
+            if (!e || !*e)
+                return false;
+            if (!strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off") || !strcmp(e, "no"))
+                return false;
+            return true;
+        }
+
+        // White-match for linear present (p3extended). Default ON; set
+        // RV_HDR_LINEAR_SDR_MATCH=0 to disable.
+        bool wantLinearSdrWhiteMatch()
+        {
+            const char* e = getenv("RV_HDR_LINEAR_SDR_MATCH");
+            if (!e || !*e)
+                return true; // default on — same class of Wayland 203-nit issue
+            if (!strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off") || !strcmp(e, "no"))
+                return false;
+            return true;
+        }
+
+        float envFloat(const char* name, float fallback)
+        {
+            const char* e = getenv(name);
+            if (!e || !*e)
+                return fallback;
+            char* end = nullptr;
+            const float v = std::strtof(e, &end);
+            if (end == e)
+                return fallback;
+            return v;
+        }
+
     } // namespace
 
     // -------------------------------------------------------------------------
@@ -54,20 +94,85 @@ namespace Rv
         : QWindow()
     {
         setSurfaceType(QSurface::VulkanSurface);
+        // Present-only surface: all clicks/drags must reach GLView underneath
+        // (pan, E+drag grade, playhead, etc.). Native windows ignore
+        // WA_TransparentForMouseEvents on the QWidget container.
+        setFlags(flags() | Qt::WindowTransparentForInput);
     }
 
     VulkanPresentWindow::~VulkanPresentWindow() { releaseRhi(); }
 
+    VulkanPresentWindow::PresentMode VulkanPresentWindow::presentModeFromEnv()
+    {
+        const char* e = getenv("RV_HDR_PRESENT");
+        if (!e || !*e)
+            return PresentMode::Pq;
+        // Accept a few aliases for A/B testing.
+        if (!strcasecmp(e, "p3extended") || !strcasecmp(e, "p3-extended") || !strcasecmp(e, "p3_extended")
+            || !strcasecmp(e, "displayp3-extended") || !strcasecmp(e, "display-p3-extended")
+            || !strcasecmp(e, "edr-p3") || !strcasecmp(e, "edrp3") || !strcasecmp(e, "p3-srgb")
+            || !strcasecmp(e, "p3srgb"))
+            return PresentMode::P3Extended;
+        if (!strcasecmp(e, "p3") || !strcasecmp(e, "p3linear") || !strcasecmp(e, "linear-p3")
+            || !strcasecmp(e, "linear_p3") || !strcasecmp(e, "p3-linear"))
+            return PresentMode::P3Linear;
+        if (!strcasecmp(e, "scrgb") || !strcasecmp(e, "srgb") || !strcasecmp(e, "srgblinear")
+            || !strcasecmp(e, "linear-srgb") || !strcasecmp(e, "srgb-linear"))
+            return PresentMode::SrgbLinear;
+        if (!strcasecmp(e, "pq") || !strcasecmp(e, "hdr10") || !strcasecmp(e, "st2084"))
+            return PresentMode::Pq;
+        cerr << "WARNING: unknown RV_HDR_PRESENT=" << e
+             << " (use pq|p3linear|srgblinear|p3extended); defaulting to pq" << endl;
+        return PresentMode::Pq;
+    }
+
     void VulkanPresentWindow::setHdrPresent(bool enabled)
     {
         m_hdr = enabled;
+        m_presentMode = presentModeFromEnv();
         QSurfaceFormat fmt = format();
-        if (m_hdr)
-            fmt.setColorSpace(QColorSpace(QColorSpace::Bt2100Pq));
-        else
+        if (!m_hdr)
+        {
             fmt.setColorSpace(QColorSpace(QColorSpace::SRgb));
+        }
+        else if (m_presentMode == PresentMode::P3Linear || m_presentMode == PresentMode::P3Extended)
+        {
+            // Must tag LINEAR transfer. QColorSpace::DisplayP3 is *gamma* (sRGB TF);
+            // if we emit linear light but advertise gamma P3, the compositor applies
+            // EOTF again → double-decode (too dark / "wrong sRGB→linear").
+            // P3Extended: OCIO Display P3 buffer is sRGB-TF encoded; shader EOTFs.
+            // P3Linear: buffer is PQ codes; shader maps nits/sdrWhite → linear.
+            fmt.setColorSpace(
+                QColorSpace(QColorSpace::Primaries::DciP3D65, QColorSpace::TransferFunction::Linear));
+        }
+        else if (m_presentMode == PresentMode::SrgbLinear)
+        {
+            fmt.setColorSpace(QColorSpace(QColorSpace::SRgbLinear));
+        }
+        else
+        {
+            fmt.setColorSpace(QColorSpace(QColorSpace::Bt2100Pq));
+        }
         setFormat(fmt);
-        cout << "INFO: VulkanPresentWindow HDR present " << (enabled ? "ON (Bt2100Pq request)" : "OFF") << endl;
+
+        const char* modeName = "pq/HDR10";
+        if (m_presentMode == PresentMode::P3Linear)
+            modeName = "p3linear";
+        else if (m_presentMode == PresentMode::P3Extended)
+            modeName = "p3extended (DisplayP3 + sRGB TF → linear P3)";
+        else if (m_presentMode == PresentMode::SrgbLinear)
+            modeName = "srgblinear";
+        cout << "INFO: VulkanPresentWindow HDR present " << (enabled ? "ON" : "OFF")
+             << " mode=" << modeName << " (RV_HDR_PRESENT)" << endl;
+
+        // Force swapchain re-pick on next frame if already live.
+        m_swapchainFormat = -1;
+        m_pipelineBuilt = false;
+    }
+
+    bool VulkanPresentWindow::presentModeNeedsFloatTransfer()
+    {
+        return presentModeFromEnv() == PresentMode::P3Extended;
     }
 
     void VulkanPresentWindow::setFrame(QImage img)
@@ -81,6 +186,22 @@ namespace Rv
         img.setDevicePixelRatio(1.0);
         m_pending = std::move(img);
         m_hasPending = true;
+        m_hasPendingFloat = false;
+        m_pendingFloat.clear();
+        if (isExposed())
+            requestUpdate();
+    }
+
+    void VulkanPresentWindow::setFrameFloat(int width, int height, std::vector<float> rgba)
+    {
+        if (width <= 0 || height <= 0 || rgba.size() < size_t(width) * size_t(height) * 4)
+            return;
+        m_pendingFloat = std::move(rgba);
+        m_pendingFloatW = width;
+        m_pendingFloatH = height;
+        m_hasPendingFloat = true;
+        m_hasPending = false;
+        m_pending = QImage();
         if (isExposed())
             requestUpdate();
     }
@@ -133,7 +254,8 @@ namespace Rv
         m_vbuf->create();
 
         // Uniform buffer for clipSpaceCorrMatrix
-        m_ubuf.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 64));
+        // std140: mat4 (64) + vec4 params (16) = 80. params.x = PQ SDR-white scale.
+        m_ubuf.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 80));
         m_ubuf->create();
     }
 
@@ -142,38 +264,52 @@ namespace Rv
         if (!m_sc)
             return;
 
-        // Default SDR.
+        // Re-read env each recreate so A/B doesn't require full restart of RHI
+        // object graph (still needs window recreate for surface colorspace).
+        if (m_hdr)
+            m_presentMode = presentModeFromEnv();
+
         QRhiSwapChain::Format fmt = QRhiSwapChain::SDR;
         const char* name = "SDR";
 
+        auto tryFmt = [&](QRhiSwapChain::Format f, const char* n) -> bool {
+            if (!m_sc->isFormatSupported(f))
+                return false;
+            fmt = f;
+            name = n;
+            return true;
+        };
+
         if (m_hdr)
         {
-            // Prefer HDR10 (PQ / ST.2084) — matches DisplayIPNode SMPTE-2084 encode
-            // and mpv's VK_COLOR_SPACE_HDR10_ST2084_EXT path on this machine.
-            if (m_sc->isFormatSupported(QRhiSwapChain::HDR10))
+            bool ok = false;
+            if (m_presentMode == PresentMode::P3Linear || m_presentMode == PresentMode::P3Extended)
             {
-                fmt = QRhiSwapChain::HDR10;
-                name = "HDR10 (PQ/ST.2084)";
+                ok = tryFmt(QRhiSwapChain::HDRExtendedDisplayP3Linear, "HDRExtendedDisplayP3Linear");
+                if (!ok)
+                    cout << "WARNING: P3 linear HDR unsupported by QRhi/Vulkan here" << endl;
             }
-            else if (m_sc->isFormatSupported(QRhiSwapChain::HDRExtendedSrgbLinear))
+            else if (m_presentMode == PresentMode::SrgbLinear)
             {
-                fmt = QRhiSwapChain::HDRExtendedSrgbLinear;
-                name = "HDRExtendedSrgbLinear";
-                cout << "WARNING: HDR10 unsupported; using scRGB linear. "
-                        "PQ-encoded FBOs will look wrong until encode matches."
-                     << endl;
-            }
-            else if (m_sc->isFormatSupported(QRhiSwapChain::HDRExtendedDisplayP3Linear))
-            {
-                fmt = QRhiSwapChain::HDRExtendedDisplayP3Linear;
-                name = "HDRExtendedDisplayP3Linear";
-                cout << "WARNING: HDR10 unsupported; using P3 linear." << endl;
+                ok = tryFmt(QRhiSwapChain::HDRExtendedSrgbLinear, "HDRExtendedSrgbLinear (scRGB)");
+                if (!ok)
+                    cout << "WARNING: scRGB linear HDR unsupported by QRhi/Vulkan here" << endl;
             }
             else
             {
-                cout << "WARNING: no HDR swapchain format supported — presenting as SDR "
-                        "(highlights will not be absolute nits)"
-                     << endl;
+                ok = tryFmt(QRhiSwapChain::HDR10, "HDR10 (PQ/ST.2084)");
+            }
+
+            // Fallbacks so we still get *some* HDR surface for comparison.
+            if (!ok)
+                ok = tryFmt(QRhiSwapChain::HDR10, "HDR10 (PQ/ST.2084) [fallback]");
+            if (!ok)
+                ok = tryFmt(QRhiSwapChain::HDRExtendedSrgbLinear, "HDRExtendedSrgbLinear [fallback]");
+            if (!ok)
+                ok = tryFmt(QRhiSwapChain::HDRExtendedDisplayP3Linear, "HDRExtendedDisplayP3Linear [fallback]");
+            if (!ok)
+            {
+                cout << "WARNING: no HDR swapchain format supported — presenting as SDR" << endl;
             }
         }
 
@@ -181,7 +317,8 @@ namespace Rv
         if (int(fmt) != m_swapchainFormat)
         {
             m_swapchainFormat = int(fmt);
-            cout << "INFO: VulkanPresentWindow swapchain format=" << name << endl;
+            cout << "INFO: VulkanPresentWindow swapchain format=" << name
+                 << " presentMode=" << int(m_presentMode) << endl;
         }
     }
 
@@ -227,19 +364,27 @@ namespace Rv
             return false;
         }
 
-        static bool loggedHdrInfo = false;
-        if (m_hdr && !loggedHdrInfo)
+        // Always refresh SDR white from the swapchain when HDR is on — this is
+        // Compositor/Qt idea of "SDR 1.0" in nits (fallback default is 203).
+        if (m_hdr)
         {
-            loggedHdrInfo = true;
             const QRhiSwapChainHdrInfo hi = m_sc->hdrInfo();
-            cout << "INFO: swapchain HDR info: limitsType=" << int(hi.limitsType)
-                 << " sdrWhiteLevel=" << hi.sdrWhiteLevel;
-            if (hi.limitsType == QRhiSwapChainHdrInfo::LuminanceInNits)
+            if (hi.sdrWhiteLevel > 1.f)
+                m_sdrWhiteLevelNits = float(hi.sdrWhiteLevel);
+
+            static bool loggedHdrInfo = false;
+            if (!loggedHdrInfo)
             {
-                cout << " minNits=" << hi.limits.luminanceInNits.minLuminance
-                     << " maxNits=" << hi.limits.luminanceInNits.maxLuminance;
+                loggedHdrInfo = true;
+                cout << "INFO: swapchain HDR info: limitsType=" << int(hi.limitsType)
+                     << " sdrWhiteLevel=" << hi.sdrWhiteLevel;
+                if (hi.limitsType == QRhiSwapChainHdrInfo::LuminanceInNits)
+                {
+                    cout << " minNits=" << hi.limits.luminanceInNits.minLuminance
+                         << " maxNits=" << hi.limits.luminanceInNits.maxLuminance;
+                }
+                cout << " formatEnum=" << int(m_sc->format()) << endl;
             }
-            cout << " formatEnum=" << int(m_sc->format()) << endl;
         }
 
         m_pipeline.reset();
@@ -247,23 +392,36 @@ namespace Rv
         return true;
     }
 
-    void VulkanPresentWindow::ensureTexture(const QSize& pixelSize)
+    void VulkanPresentWindow::ensureTexture(const QSize& pixelSize, bool asFloat)
     {
         if (!m_rhi || !pixelSize.isValid())
             return;
-        if (m_tex && m_texSize == pixelSize)
+        if (m_tex && m_texSize == pixelSize && m_texIsFloat == asFloat)
             return;
-        m_tex.reset(m_rhi->newTexture(QRhiTexture::RGBA8, pixelSize, 1, {}));
+        m_tex.reset();
+        const QRhiTexture::Format fmt = asFloat ? QRhiTexture::RGBA32F : QRhiTexture::RGBA8;
+        m_tex.reset(m_rhi->newTexture(fmt, pixelSize, 1, {}));
         if (!m_tex->create())
         {
-            cerr << "ERROR: present texture create failed" << endl;
+            cerr << "ERROR: present texture create failed (float=" << asFloat << ")" << endl;
             m_tex.reset();
+            m_texIsFloat = false;
             return;
         }
         m_texSize = pixelSize;
+        m_texIsFloat = asFloat;
         m_srb.reset();
         m_pipeline.reset();
         m_pipelineBuilt = false;
+        if (asFloat)
+        {
+            static bool once = false;
+            if (!once)
+            {
+                once = true;
+                cout << "INFO: present upload texture RGBA32F (float transfer for p3extended)" << endl;
+            }
+        }
     }
 
     void VulkanPresentWindow::ensurePipeline()
@@ -273,7 +431,8 @@ namespace Rv
 
         m_srb.reset(m_rhi->newShaderResourceBindings());
         m_srb->setBindings({
-            QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, m_ubuf.get()),
+            QRhiShaderResourceBinding::uniformBuffer(
+                0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, m_ubuf.get()),
             QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, m_tex.get(),
                                                       m_sampler.get()),
         });
@@ -348,45 +507,57 @@ namespace Rv
             m_vbufUploaded = true;
         }
 
-        // Clip-space correction so NDC Y-up quad is correct on Vulkan.
-        {
-            QMatrix4x4 corr = m_rhi->clipSpaceCorrMatrix();
-            // QMatrix4x4 is column-major; std140 mat4 matches.
-            float mat[16];
-            memcpy(mat, corr.constData(), sizeof(mat));
-            u->updateDynamicBuffer(m_ubuf.get(), 0, 64, mat);
-        }
-
         const QSize outputSize = m_sc->currentPixelSize();
 
-        if (m_hasPending && !m_pending.isNull())
-        {
-            // GL FBO (grab) and the embedded QWindow swapchain can disagree on
-            // fractional DPR (e.g. FBO @2.0 vs window @1.25). Fit the full grab
-            // into the swapchain (letterbox if needed).
-            QImage img = m_pending;
-            if (outputSize.isValid() && img.size() != outputSize)
-            {
-                img = img.scaled(outputSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                if (img.size() != outputSize)
-                {
-                    QImage canvas(outputSize, QImage::Format_RGBA8888);
-                    canvas.fill(Qt::black);
-                    const int x = (outputSize.width() - img.width()) / 2;
-                    const int y = (outputSize.height() - img.height()) / 2;
-                    QPainter paint(&canvas);
-                    paint.drawImage(x, y, img);
-                    paint.end();
-                    img = std::move(canvas);
-                }
-            }
+        // Letterbox in the GPU viewport — never CPU-scale full frames.
+        // Upload texture at native grab size; fit into swapchain with black bars.
+        float flipV = 0.f;
+        QSize texSize;
+        bool haveTex = false;
 
-            // Optional synthetic PQ wedges to validate the HDR10 surface itself
-            // (bypass GL). Left≈100 nits, center≈1000, right≈400.
+        if (m_hasPendingFloat && !m_pendingFloat.empty())
+        {
+            // Float path: raw GL readback (bottom-up). Flip V in the vertex shader.
+            const int srcW = m_pendingFloatW;
+            const int srcH = m_pendingFloatH;
+            texSize = QSize(srcW, srcH);
+            ensureTexture(texSize, true);
+            if (m_tex)
+            {
+                QByteArray bytes(reinterpret_cast<const char*>(m_pendingFloat.data()),
+                                 qsizetype(m_pendingFloat.size() * sizeof(float)));
+                QRhiTextureSubresourceUploadDescription sub(bytes);
+                sub.setSourceSize(texSize);
+                QRhiTextureUploadEntry entry(0, 0, sub);
+                QRhiTextureUploadDescription desc(entry);
+                u->uploadTexture(m_tex.get(), desc);
+                haveTex = true;
+                flipV = 1.f; // glReadPixels origin
+            }
+            m_hasPendingFloat = false;
+
+            static int s_flog = 0;
+            if (s_flog++ < 5 && srcW > 0 && srcH > 0)
+            {
+                auto samp = [&](float fx) {
+                    const int x = int(fx * (srcW - 1));
+                    const int y = srcH / 2; // mid of bottom-up buffer ≈ visual mid after flip
+                    return m_pendingFloat[(size_t(y) * srcW + x) * 4];
+                };
+                cout << "INFO: present upload FLOAT " << srcW << "x" << srcH
+                     << " swap=" << outputSize.width() << "x" << outputSize.height()
+                     << " (GPU letterbox+flip) LCR_f≈" << samp(0.2f) << "," << samp(0.5f) << ","
+                     << samp(0.8f) << " scFmt=" << m_swapchainFormat << " shMode=" << presentShaderMode()
+                     << endl;
+            }
+        }
+        else if (m_hasPending && !m_pending.isNull())
+        {
+            // 8-bit path: grabFramebuffer is already top-left (no flip).
+            QImage img = m_pending;
             if (getenv("RV_HDR_TEST_PATTERN") && *getenv("RV_HDR_TEST_PATTERN") != '0' && m_hdr)
             {
-                img = QImage(outputSize, QImage::Format_RGBA8888);
-                // PQ codes for 100 / 1000 / 400 nits (approx 8-bit)
+                img = QImage(outputSize.isValid() ? outputSize : img.size(), QImage::Format_RGBA8888);
                 const int pq100 = 130, pq400 = 164, pq1000 = 192;
                 for (int y = 0; y < img.height(); ++y)
                 {
@@ -407,35 +578,71 @@ namespace Rv
                 }
             }
 
-            ensureTexture(img.size());
+            texSize = img.size();
+            ensureTexture(texSize, false);
             if (m_tex)
+            {
                 u->uploadTexture(m_tex.get(), img);
+                haveTex = true;
+                flipV = 0.f;
+            }
             m_hasPending = false;
 
             static int s_log = 0;
             if (s_log++ < 5)
             {
-                // Sample present tex L/C/R before upload
                 auto samp = [&](float fx) {
                     const int x = int(fx * (img.width() - 1));
                     const int y = img.height() / 2;
                     return int(img.pixelColor(x, y).red());
                 };
-                cout << "INFO: present upload src=" << m_pending.width() << "x" << m_pending.height()
-                     << " -> tex=" << img.width() << "x" << img.height() << " swap=" << outputSize.width() << "x"
-                     << outputSize.height() << " win=" << width() << "x" << height() << "@" << devicePixelRatio()
-                     << " LCR8=" << samp(0.2f) << "," << samp(0.5f) << "," << samp(0.8f)
-                     << " scFmt=" << m_swapchainFormat << endl;
+                cout << "INFO: present upload " << img.width() << "x" << img.height()
+                     << " swap=" << outputSize.width() << "x" << outputSize.height()
+                     << " (GPU letterbox) LCR8=" << samp(0.2f) << "," << samp(0.5f) << "," << samp(0.8f)
+                     << " scFmt=" << m_swapchainFormat << " shMode=" << presentShaderMode() << endl;
             }
         }
+
+        // UBO: color-mode params + flip flag (params.w).
+        {
+            QMatrix4x4 corr = m_rhi->clipSpaceCorrMatrix();
+            alignas(16) float ubo[20];
+            memcpy(ubo, corr.constData(), 64);
+            const int mode = m_hdr ? presentShaderMode() : 0;
+            const float sdrWhite = resolveSdrWhiteNits();
+            float scale = 1.f;
+            if (mode == 1 && wantPqSdrWhiteScale())
+                scale = pqSdrWhiteScale();
+            else if (mode == 3)
+                scale = linearSdrWhiteMatchScale();
+            ubo[16] = scale;
+            ubo[17] = float(mode);
+            ubo[18] = sdrWhite;
+            ubo[19] = flipV;
+            u->updateDynamicBuffer(m_ubuf.get(), 0, 80, ubo);
+        }
+
         ensurePipeline();
+
+        // Fit texture aspect into swapchain (letterbox/pillarbox) on GPU.
+        float vpX = 0.f, vpY = 0.f, vpW = float(outputSize.width()), vpH = float(outputSize.height());
+        if (haveTex && texSize.isValid() && outputSize.isValid() && texSize.width() > 0 && texSize.height() > 0)
+        {
+            const float sx = float(outputSize.width()) / float(texSize.width());
+            const float sy = float(outputSize.height()) / float(texSize.height());
+            const float s = std::min(sx, sy);
+            vpW = float(texSize.width()) * s;
+            vpH = float(texSize.height()) * s;
+            vpX = 0.5f * (float(outputSize.width()) - vpW);
+            vpY = 0.5f * (float(outputSize.height()) - vpH);
+        }
 
         const QColor clear = Qt::black;
         cb->beginPass(m_sc->currentFrameRenderTarget(), clear, {1.0f, 0}, u);
-        if (m_pipeline && m_srb && m_tex && m_vbuf)
+        if (m_pipeline && m_srb && m_tex && m_vbuf && haveTex)
         {
             cb->setGraphicsPipeline(m_pipeline.get());
-            cb->setViewport(QRhiViewport(0, 0, float(outputSize.width()), float(outputSize.height())));
+            cb->setViewport(QRhiViewport(vpX, vpY, vpW, vpH));
             cb->setShaderResources(m_srb.get());
             const QRhiCommandBuffer::VertexInput vbufBinding(m_vbuf.get(), 0);
             cb->setVertexInput(0, 1, &vbufBinding);
@@ -443,6 +650,109 @@ namespace Rv
         }
         cb->endPass();
         m_rhi->endFrame(m_sc.get());
+    }
+
+    float VulkanPresentWindow::resolveSdrWhiteNits() const
+    {
+        // Prefer live swapchain value as reported; env override; else media white 203.
+        float sdrWhite = m_sdrWhiteLevelNits;
+        if (const char* e = getenv("RV_HDR_SDR_WHITE"); e && *e)
+            sdrWhite = envFloat("RV_HDR_SDR_WHITE", sdrWhite > 1.f ? sdrWhite : 203.f);
+        if (sdrWhite <= 1.f)
+            sdrWhite = 203.f;
+        return sdrWhite;
+    }
+
+    int VulkanPresentWindow::presentShaderMode() const
+    {
+        // 0 = passthrough
+        // 1 = PQ SDR-white scale (stay on HDR10)
+        // 2 = PQ → linear (1.0 = sdrWhite) for linear surfaces fed PQ codes
+        // 3 = piecewise sRGB TF → linear (Display P3 Extended / macOS EDR)
+        if (!m_hdr)
+            return 0;
+
+        if (m_presentMode == PresentMode::P3Extended)
+        {
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                cout << "INFO: present shader mode=DisplayP3 Extended "
+                        "(sRGB EOTF → linear P3, float transfer). "
+                        "Expect OCIO Display P3 (sRGB TF), not PQ. "
+                        "Linear SDR white-match default ON (RV_HDR_LINEAR_SDR_MATCH=0 to disable)."
+                     << endl;
+            }
+            return 3;
+        }
+
+        if (m_presentMode == PresentMode::P3Linear || m_presentMode == PresentMode::SrgbLinear)
+        {
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                cout << "INFO: present shader mode=PQ→linear (1.0=" << resolveSdrWhiteNits()
+                     << " nits SDR white) for linear HDR surface. "
+                        "Input FBO is still 8-bit PQ codes from OCIO/Display."
+                     << endl;
+            }
+            return 2;
+        }
+
+        // PQ / HDR10 path
+        if (wantPqSdrWhiteScale())
+            return 1;
+        return 0;
+    }
+
+    float VulkanPresentWindow::pqSdrWhiteScale() const
+    {
+        const float sdrWhite = resolveSdrWhiteNits();
+        // Content / mastering reference white the PQ buffer was authored against.
+        const float refWhite = envFloat("RV_HDR_PQ_REF_WHITE", 100.f);
+        if (refWhite <= 0.f)
+            return 1.f;
+
+        const float scale = sdrWhite / refWhite;
+
+        static bool logged = false;
+        if (!logged && wantPqSdrWhiteScale())
+        {
+            logged = true;
+            cout << "INFO: post-OCIO PQ SDR-white scale ON (GPU present): PQ→linear→×" << scale
+                 << "→PQ  (sdrWhite=" << sdrWhite << " nits, refWhite=" << refWhite
+                 << " nits; set RV_HDR_SDR_WHITE / RV_HDR_PQ_REF_WHITE to override)"
+                 << endl;
+        }
+        return scale;
+    }
+
+    float VulkanPresentWindow::linearSdrWhiteMatchScale() const
+    {
+        if (!wantLinearSdrWhiteMatch())
+            return 1.f;
+
+        // After EOTF, content paper white is linear 1.0. On this Wayland stack
+        // linear-1.0 often sits below pure SDR UI white — same root cause as the
+        // PQ 203-nit issue. Boost by sdrWhite/refWhite (defaults 203/100 ≈ 2.03).
+        // Override: RV_HDR_SDR_WHITE, RV_HDR_PQ_REF_WHITE (or set MATCH=0).
+        const float sdrWhite = resolveSdrWhiteNits();
+        const float refWhite = envFloat("RV_HDR_PQ_REF_WHITE", 100.f);
+        if (refWhite <= 0.f)
+            return 1.f;
+        const float scale = sdrWhite / refWhite;
+
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            cout << "INFO: linear present SDR-white match ×" << scale
+                 << " (sdrWhite=" << sdrWhite << " nits, refWhite=" << refWhite
+                 << "; RV_HDR_LINEAR_SDR_MATCH=0 to disable)" << endl;
+        }
+        return scale;
     }
 
     void VulkanPresentWindow::exposeEvent(QExposeEvent*)
@@ -501,6 +811,9 @@ namespace Rv
         // Embed as subsurface of this widget → one Hyprland top-level (RV).
         m_container = QWidget::createWindowContainer(m_window, this);
         m_container->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        m_container->setFocusPolicy(Qt::NoFocus);
+        // createWindowContainer can reset window flags; re-assert input passthrough.
+        m_window->setFlags(m_window->flags() | Qt::WindowTransparentForInput);
         auto* lay = new QVBoxLayout(this);
         lay->setContentsMargins(0, 0, 0, 0);
         lay->setSpacing(0);
@@ -517,6 +830,12 @@ namespace Rv
     {
         if (m_window)
             m_window->setFrame(std::move(img));
+    }
+
+    void VulkanPresentWidget::setFrameFloat(int width, int height, std::vector<float> rgba)
+    {
+        if (m_window)
+            m_window->setFrameFloat(width, height, std::move(rgba));
     }
 
     void VulkanPresentWidget::setHdrPresent(bool enabled)

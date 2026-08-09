@@ -82,9 +82,14 @@ namespace Rv
             m_view->makeCurrent();
             TWK_GLDEBUG;
 
-            GLint widgetFBO = m_view->defaultFramebufferObject();
-            if (widgetFBO != 0)
-                glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, widgetFBO);
+            // Prefer float present FBO (p3extended) when the view is GLView.
+            GLuint fbo = 0;
+            if (auto* glView = qobject_cast<GLView*>(m_view))
+                fbo = glView->presentFramebufferObject();
+            else if (m_view)
+                fbo = m_view->defaultFramebufferObject();
+            if (fbo != 0)
+                glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
             TWK_GLDEBUG;
         }
 
@@ -94,9 +99,10 @@ namespace Rv
 
     GLuint QTGLVideoDevice::fboID() const
     {
+        if (auto* glView = qobject_cast<GLView*>(m_view))
+            return glView->presentFramebufferObject();
         if (m_view)
             return m_view->defaultFramebufferObject();
-
         return 0;
     }
 
