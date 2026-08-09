@@ -23,6 +23,7 @@ using namespace std;
 typedef void(APIENTRY* PFN_glCreateMemoryObjectsEXT)(GLsizei, GLuint*);
 typedef void(APIENTRY* PFN_glDeleteMemoryObjectsEXT)(GLsizei, const GLuint*);
 typedef void(APIENTRY* PFN_glImportMemoryFdEXT)(GLuint, GLuint64, GLenum, GLint);
+typedef void(APIENTRY* PFN_glMemoryObjectParameterivEXT)(GLuint, GLenum, const GLint*);
 typedef void(APIENTRY* PFN_glTextureStorageMem2DEXT)(GLuint, GLsizei, GLenum, GLsizei, GLsizei, GLuint, GLuint64);
 typedef void(APIENTRY* PFN_glCreateTextures)(GLenum, GLsizei, GLuint*);
 typedef void(APIENTRY* PFN_glCreateFramebuffers)(GLsizei, GLuint*);
@@ -34,11 +35,20 @@ typedef void(APIENTRY* PFN_glMemoryBarrier)(GLbitfield);
 #ifndef GL_HANDLE_TYPE_OPAQUE_FD_EXT
 #define GL_HANDLE_TYPE_OPAQUE_FD_EXT 0x9586
 #endif
+#ifndef GL_DEDICATED_MEMORY_OBJECT_EXT
+#define GL_DEDICATED_MEMORY_OBJECT_EXT 0x9581
+#endif
 #ifndef GL_TEXTURE_UPDATE_BARRIER_BIT
 #define GL_TEXTURE_UPDATE_BARRIER_BIT 0x00000100
 #endif
 #ifndef GL_FRAMEBUFFER_BARRIER_BIT
 #define GL_FRAMEBUFFER_BARRIER_BIT 0x00000400
+#endif
+#ifndef GL_TEXTURE_TILING_EXT
+#define GL_TEXTURE_TILING_EXT 0x9580
+#endif
+#ifndef GL_OPTIMAL_TILING_EXT
+#define GL_OPTIMAL_TILING_EXT 0x9584
 #endif
 
 // Qt builds with VK_NO_PROTOTYPES — load every Vulkan entry point we need.
@@ -82,14 +92,13 @@ namespace Rv
 {
     namespace
     {
-        // Opt-in until the GL→Vk copy path is rock-solid on all drivers.
-        // Default OFF: CPU readback present (known good). Set RV_HDR_GL_VK_INTEROP=1 to try GPU.
-        bool envEnabled()
+        // Default ON. Set RV_HDR_GL_VK_INTEROP=0 to force CPU readback.
+        bool envDisabled()
         {
             const char* e = getenv("RV_HDR_GL_VK_INTEROP");
             if (!e || !*e)
                 return false;
-            return !strcmp(e, "1") || !strcmp(e, "true") || !strcmp(e, "on") || !strcmp(e, "yes");
+            return !strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off") || !strcmp(e, "no");
         }
 
         template <typename T>
@@ -152,7 +161,7 @@ namespace Rv
 
     bool GlVkSharedImage::isSupported(QRhi* rhi, QOpenGLContext* glctx)
     {
-        if (!envEnabled() || !rhi || !glctx)
+        if (envDisabled() || !rhi || !glctx)
             return false;
         if (rhi->backend() != QRhi::Vulkan)
             return false;
@@ -428,17 +437,22 @@ namespace Rv
         }
 
         createMem(1, &m_glMem);
+
+        // Vulkan allocates with VkMemoryDedicatedAllocateInfo — GL must mark the
+        // memory object dedicated *before* import (EXT_memory_object issue #19).
+        // Without this, import/blit often "succeeds" but the image stays black.
+        auto memParam = glProc<PFN_glMemoryObjectParameterivEXT>(glctx, "glMemoryObjectParameterivEXT");
+        if (memParam)
+        {
+            const GLint dedicated = GL_TRUE;
+            memParam(m_glMem, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated);
+        }
+
+        // fd is consumed on success
         importFd(m_glMem, GLuint64(memSize), GL_HANDLE_TYPE_OPAQUE_FD_EXT, fd);
 
         createTex(GL_TEXTURE_2D, 1, &m_glTex);
-        // Must match Vulkan image tiling *before* TextureStorageMem, or the
-        // texture is unusable as an FBO (blit "succeeds" but stays black).
-#ifndef GL_TEXTURE_TILING_EXT
-#define GL_TEXTURE_TILING_EXT 0x9580
-#endif
-#ifndef GL_OPTIMAL_TILING_EXT
-#define GL_OPTIMAL_TILING_EXT 0x9584
-#endif
+        // Must match Vulkan OPTIMAL tiling *before* TextureStorageMem.
         typedef void(APIENTRY* PFN_glTextureParameteri)(GLuint, GLenum, GLint);
         if (auto texParam = glProc<PFN_glTextureParameteri>(glctx, "glTextureParameteri"))
             texParam(m_glTex, GL_TEXTURE_TILING_EXT, GL_OPTIMAL_TILING_EXT);
@@ -622,46 +636,9 @@ namespace Rv
             return false;
         }
 
-        // Verify the shared FBO received pixels. On some NVIDIA stacks,
-        // EXT_memory_object import + FBO blit "succeeds" but writes nothing
-        // (center stays 0) while the source FBO is fine — treat that as failure
-        // so the caller falls back to CPU readback.
-        {
-            GLint prev = 0;
-            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev);
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, m_glFbo);
-            unsigned char rgba[4] = {0, 0, 0, 0};
-            glReadPixels(std::max(0, width / 2), std::max(0, height / 2), 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, prev);
-            if (rgba[0] == 0 && rgba[1] == 0 && rgba[2] == 0)
-            {
-                // Also check source — if source has content, interop blit is broken.
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFbo);
-                unsigned char src[4] = {0, 0, 0, 0};
-                glReadPixels(std::max(0, width / 2), std::max(0, height / 2), 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, src);
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, prev);
-                if (src[0] || src[1] || src[2])
-                {
-                    static bool once = false;
-                    if (!once)
-                    {
-                        once = true;
-                        cerr << "ERROR: GL↔Vulkan shared blit is black while source has content "
-                                "(src="
-                             << int(src[0]) << "," << int(src[1]) << "," << int(src[2])
-                             << ") — falling back to CPU readback" << endl;
-                    }
-                    return false;
-                }
-            }
-            else if (getenv("RV_GL_PROBE") && *getenv("RV_GL_PROBE") != '0')
-            {
-                static int s_blitProbe = 0;
-                if (s_blitProbe++ < 3)
-                    cout << "INFO: shared-blit probe center8=" << int(rgba[0]) << "," << int(rgba[1]) << ","
-                         << int(rgba[2]) << "," << int(rgba[3]) << endl;
-            }
-        }
+        // Do NOT glReadPixels-probe the shared FBO: ReadPixels/GetTexImage on
+        // EXT_memory_object stores are not reliably supported and often return
+        // zeros even when the GPU write is fine (we used to false-fail here).
 
         m_layout = int(VK_IMAGE_LAYOUT_GENERAL);
         return true;

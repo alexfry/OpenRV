@@ -405,8 +405,8 @@ namespace Rv
             if (!once)
             {
                 once = true;
-                // Default is CPU readback; set RV_HDR_GL_VK_INTEROP=1 to try zero-copy.
-                cout << "INFO: present uses CPU readback (set RV_HDR_GL_VK_INTEROP=1 for GPU interop)"
+                cout << "INFO: present uses CPU readback (GPU interop unavailable; "
+                        "RV_HDR_GL_VK_INTEROP=0 forces this)"
                      << endl;
             }
             m_gpuInterop = false;
