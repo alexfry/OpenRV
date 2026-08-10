@@ -29,10 +29,16 @@ precisely the *native* model on macOS:
   **IOSurface**-based GL↔Metal share — which is a *simpler* and better-trodden
   mechanism than the Vulkan external-memory path.
 
-The one genuine gap: **no HDR10/PQ swapchain via Qt's Metal backend**
-(`isFormatSupported()` returns true only for SDR + the two extended-linear
-formats). The `pq` present mode cannot be a native PQ surface through QRhi;
-options below.
+One caveat, narrower than it first looks: Qt's QRhi Metal backend exposes no
+HDR10/PQ swapchain *format* (`isFormatSupported()` returns true only for SDR +
+the two extended-linear formats). But on macOS the drawable colorspace is just
+a `CALayer` property — WindowServer color-matches whatever the layer is tagged
+with, including `kCGColorSpaceITUR_2100_PQ`, HLG, and fully **custom**
+calibrated spaces. A small native shim that overrides
+`CAMetalLayer.colorspace` after QRhi creates the swapchain gives a true PQ
+surface while keeping the whole QRhi present path. ImageScope
+(`alexfry/imagescope`) ships exactly this model in production — see
+"Prior art: ImageScope" below.
 
 ---
 
@@ -80,32 +86,67 @@ Consequences:
 
 ---
 
-## The PQ / HDR10 gap and options
+## PQ (and arbitrary surface tags) on macOS
 
-`QMetalSwapChain::isFormatSupported()` (qtbase 6.8, ~line 6194) accepts only
-`SDR`, `HDRExtendedSrgbLinear`, `HDRExtendedDisplayP3Linear`. There is no
-HDR10 path in QRhi's Metal backend, so `RV_HDR_PRESENT=pq` as a *native
-surface* is off the table via Qt.
+Two facts, which pull in opposite directions:
 
-Options, in recommended order:
+- `QMetalSwapChain::isFormatSupported()` (qtbase 6.8, ~line 6194) accepts only
+  `SDR`, `HDRExtendedSrgbLinear`, `HDRExtendedDisplayP3Linear` — QRhi's
+  *abstraction* has no HDR10/PQ swapchain format on Metal.
+- Metal/Core Animation itself has no such limitation. The drawable's
+  colorspace is an assignable `CALayer` property, and WindowServer
+  color-matches layer contents from **any** CGColorSpace to the display:
+  `itur_2100_PQ`, `itur_2100_HLG`, `itur_2020`, and custom calibrated spaces
+  built from primaries + gamma. ImageScope demonstrates this in production
+  with an `rgba16Float` MTKView drawable, `wantsExtendedDynamicRangeContent =
+  true`, and a user-selectable surface tag including PQ and a hand-built
+  BT.1886 (Rec.709 γ2.4) space (`MetalEDRImageView.swift`:
+  `colorSpaceForIdentifier()`, `createBT1886ColorSpace()`).
 
-1. **Decode PQ in the present shader onto the EDR surface** — this already
-   exists as mode 2 (`p3linear`/`srgblinear`: PQ → linear relative to a white).
-   On macOS set the divisor to the *content* reference white
-   (`RV_HDR_PQ_REF_WHITE`, default 100): EDR = nits/refWhite. A Rec.2100-PQ
-   OCIO view then displays correctly on the EDR swapchain, with the OS
-   handling headroom. This keeps the full A/B story (PQ views vs Display P3
-   views) with zero new surface work. **Recommended.**
-2. **Native PQ layer outside QRhi** — drive the `CAMetalLayer` directly
-   (colorspace `kCGColorSpaceITUR_2100_PQ`, `CAEDRMetadata` for
-   mastering/content light level) with a hand-rolled Metal present loop.
-   Doable (this is what mpv/VLC-style players do) but forfeits the shared QRhi
-   code path; only worth it if OS-side HDR10 tone mapping (vs clamp at
-   headroom) becomes a requirement.
-3. Wait/patch upstream Qt — HDR10-on-Metal would be a contained patch to
-   `qrhimetal.mm` (`chooseFormats` + colorspace + `CAEDRMetadata`); OpenRV
-   already builds its own Qt-adjacent deps, but carrying a qtbase patch is a
-   bigger hammer than 1.
+So a native PQ surface through the QRhi path costs one small shim, not a
+hand-rolled present loop:
+
+1. **QRhi + native colorspace override — recommended.** Create the swapchain
+   as `HDRExtendedSrgbLinear` (that buys `MTLPixelFormatRGBA16Float` +
+   `wantsExtendedDynamicRangeContent` from Qt), then in a ~30-line Obj-C++
+   shim grab the `CAMetalLayer` from the present window's `NSView` and assign
+   `layer.colorspace` per the selected present mode
+   (`kCGColorSpaceITUR_2100_PQ` for `pq`, etc.). Qt assigns the colorspace in
+   `createOrResize()`, so re-apply the override after every swapchain
+   create/resize (the branch already funnels those through one place).
+   Present shader mode 0 (passthrough) — the FBO already holds PQ codes.
+   Optionally set `CAMetalLayer.edrMetadata` (`CAEDRMetadata`, macOS 10.15+)
+   for HDR10-style mastering metadata.
+2. **Decode PQ in the present shader onto the extended-linear surface** —
+   already exists as mode 2 (`p3linear`/`srgblinear`), divisor =
+   `RV_HDR_PQ_REF_WHITE` (default 100): EDR = nits/refWhite. Zero native code;
+   display-referred rather than absolute. Keep as the A/B partner and
+   fallback.
+3. Upstream the gap to Qt — HDR10-on-Metal is a contained `qrhimetal.mm`
+   patch (`chooseFormats` + colorspace + `CAEDRMetadata`). Worth filing, not
+   worth blocking on.
+
+Semantics note: a PQ-tagged surface is **absolute** (code 1.0 = 10 000 nits);
+macOS tone-maps into current panel/EDR headroom. That restores the
+absolute-nits review model on macOS *without* requiring a Reference Mode —
+with the usual caveat that above-headroom content is OS-tone-mapped rather
+than clipped, so Reference Modes remain the strict-grading answer.
+
+### Prior art: ImageScope (`alexfry/imagescope`)
+
+A working macOS-native OCIO EDR viewer whose display end mirrors what OpenRV's
+present window needs to become:
+
+| ImageScope piece | Relevance to the OpenRV port |
+|---|---|
+| `MetalEDRImageView.swift` — `rgba16Float` drawable, `wantsExtendedDynamicRangeContent`, assignable `colorspace` | Proof of every surface tag OpenRV would use: extended-linear P3 (what QRhi provides), PQ, HLG, BT.2020, plus custom calibrated spaces (BT.1886 γ2.4, P3-D65 γ2.6) for display-managed **SDR** review surfaces |
+| `DisplaySurfaceMapping.swift` — user-editable JSON regex rules mapping OCIO display name → surface tag, first match wins | Better selection model than a static `RV_HDR_PRESENT` env var: derive the surface from the active OCIO display/view, with user-overridable rules. Worth adopting once the macOS path lands |
+| OCIO GPU pipeline → tagged drawable handoff | Same encode-in-view / tag-the-surface contract the Wayland branch's present modes formalize |
+
+The custom-calibrated-space trick also generalizes the story beyond HDR: a
+BT.1886 or γ2.6 P3 surface tag lets ColorSync manage SDR review spaces
+end-to-end, replacing the ICC-profile guesswork in
+`CGDesktopVideoDevice::colorProfile()` for the image plane.
 
 ---
 
@@ -269,7 +310,7 @@ cherry-picked; the macOS work is then additive.
 | **0 — Spike** | Hello-EDR: bare `QWindow(MetalSurface)` + QRhi Metal + `HDRExtendedDisplayP3Linear`, render a >1.0 gradient; embed via `createWindowContainer` over a live QOpenGLWidget in a toy app. Confirms the two structural risks in a day. | 1–2 days |
 | **1 — CPU present** | Gate present widget on `PLATFORM_DARWIN`: QRhi Metal backend selection, `p3extended` default, skip Vulkan instance. Existing half-float readback path → EDR on screen end-to-end. Wedge EXR + OCIO Display P3 view validation. | 2–4 days |
 | **2 — IOSurface interop** | `GlMtlSharedImage` (Obj-C++), wire into `ensureGpuInterop`/`blitFromGlFramebuffer`/present. Perf target: same as Wayland (locked 24 large-window). | 3–5 days |
-| **3 — PQ mode + polish** | PQ-decode mode divisor semantics on display-referred surface; per-screen headroom in HUD; screen-change swapchain rebuild; stock-path clamp audit; docs (`HDR-MACOS.md` field notes as bring-up proceeds). | 3–5 days |
+| **3 — PQ mode + polish** | Native PQ surface via the `CAMetalLayer.colorspace` override shim (+ optional `edrMetadata`); PQ-decode mode as A/B partner; per-screen headroom in HUD; screen-change swapchain rebuild; stock-path clamp audit; OCIO-display→surface mapping rules (ImageScope model); docs (`HDR-MACOS.md` field notes as bring-up proceeds). | 3–5 days |
 
 Total: roughly **2–3 weeks** of focused work given the Wayland branch exists —
 the majority of the design risk was already retired there.
@@ -311,3 +352,6 @@ the majority of the design risk was already retired there.
   path ([HDR on macOS tracking issue](https://issues.chromium.org/issues/41466723)).
 - Reference implementation: this repo's Wayland branch
   `alexfry/arch-qt611-wayland-build` + `_hdr_test/HDR-WAYLAND.md`.
+- macOS-native prior art: `alexfry/imagescope` — `MetalEDRImageView.swift`
+  (EDR drawable + assignable surface colorspace incl. PQ/HLG/custom BT.1886),
+  `DisplaySurfaceMapping.swift` (OCIO display → surface tag rules).
