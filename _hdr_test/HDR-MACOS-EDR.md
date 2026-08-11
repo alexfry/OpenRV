@@ -102,6 +102,26 @@ readback is bottom-up (`flipV=1`); `grabFramebuffer()` is already top-left
 well after `RvDocument` construction — after plugin loading. Diagnostics that
 sample too early will wrongly conclude the swapchain never came up.
 
+**7. `Qt::WindowTransparentForInput` is required on macOS too, and it is the
+only layer that works.** Without it the native overlay swallows clicks in the
+viewer and timeline and modifier drags like E+drag for exposure — the same
+symptom Linux hit. Two things make this easy to get wrong:
+
+- `WA_TransparentForMouseEvents` on the widget and container is *not* enough.
+  Those govern QWidget delivery; the overlay is a native window on top.
+- `GLView::eventFilter` cannot cover for it. It matches on
+  `qobject_cast<QWidget*>(object)`, and events delivered to a native `QWindow`
+  are not QWidgets, so they never match. On Linux it is a genuine backup only
+  because some events still arrive via the container widget.
+
+Set the flag *after* `createWindowContainer`, which can reset window flags.
+
+**Spike B did not catch this**, and it is worth understanding why: the spike
+validated stacking, exposure, sizing and fullscreen, but had no interactive
+content beneath the overlay, so "do clicks reach the widget below" was never
+exercised. A spike passing is not the same as the pattern being complete. Any
+future present-surface spike should put something clickable underneath.
+
 ### Still not done
 
 - **GPU interop.** `ensureGpuInterop()` returns false, so GLView uses its CPU

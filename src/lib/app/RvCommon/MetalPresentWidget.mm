@@ -486,6 +486,12 @@ namespace Rv
         m_container = QWidget::createWindowContainer(m_window, this);
         m_container->setAttribute(Qt::WA_TransparentForMouseEvents, true);
         m_container->setFocusPolicy(Qt::NoFocus);
+        // The widget attributes above only cover QWidget delivery. This overlay
+        // is a *native* window on top of GLView, so without declaring it
+        // output-only it swallows clicks in the viewer and timeline, and
+        // modifier drags like E+drag for exposure. createWindowContainer can
+        // also reset window flags, so assert this after creating the container.
+        m_window->setFlags(m_window->flags() | Qt::WindowTransparentForInput);
 
         auto* layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
