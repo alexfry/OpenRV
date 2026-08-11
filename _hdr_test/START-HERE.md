@@ -1,8 +1,9 @@
 # START HERE — HDR / EDR present-surface work
 
-Handoff note for a session picking this branch up cold. Nothing here is
-implemented yet: this branch is **design only**. Read this file first, then
-work in the order below.
+Handoff note for a session picking this branch up cold. The docs added here
+are **design only** — no new code yet — but they now sit *on top of* the
+working Wayland implementation rather than beside it. Read this file first,
+then work in the order below.
 
 ---
 
@@ -12,10 +13,10 @@ Design work for unifying **desktop HDR presentation** across Linux (Wayland /
 Vulkan) and macOS (EDR / Metal) in one fork, driven from OCIO display
 colorspaces.
 
-The working implementation it builds on is a *different* branch:
-`alexfry/arch-qt611-wayland-build` — Wayland + Vulkan HDR, brought up on Arch
-/ Hyprland / NVIDIA / dual Dell S3225QC / Qt 6.11 / OCIO 2.5.2. That branch
-works today; this one plans how to generalize it.
+It is branched from `alexfry/arch-qt611-wayland-build` — Wayland + Vulkan HDR,
+brought up on Arch / Hyprland / NVIDIA / dual Dell S3225QC / Qt 6.11 / OCIO
+2.5.2. That implementation works today and is present in this tree; the design
+docs plan how to generalize it to a second platform.
 
 ### Reading order
 
@@ -23,7 +24,7 @@ works today; this one plans how to generalize it.
 |---|---|---|
 | 1 | `HDR-SURFACE-DESIGN.md` | **The main document.** Cross-platform design: the three-layer insight, canonical space vocabulary, resolution and fallback, platform backends, OCIO integration, mapping file, UI strategy, phasing |
 | 2 | `HDR-MACOS-EDR.md` | macOS feasibility and effort estimate; IOSurface interop design |
-| 3 | `HDR-WAYLAND.md` | Pre-existing Linux field notes from the working branch (env vars, A/B recipes, pitfalls). Not written as part of this design work |
+| 3 | `HDR-WAYLAND.md` | Pre-existing Linux field notes from the Wayland base (env vars, A/B recipes, pitfalls). Not written as part of this design work |
 
 ### The design in three sentences
 
@@ -180,11 +181,17 @@ Beyond the spikes:
 
 ## 6. Branch state
 
-Branch: `claude/macos-edr-display-assessment-hxid10`, branched from `main`.
-Design documents only — **no code changes**. `_hdr_test/` also contains the
-pre-existing Wayland notes and test wedge material.
+Branch: `claude/macos-edr-display-assessment-hxid10`, branched from
+`alexfry/arch-qt611-wayland-build` (originally cut from `main` and rebased
+onto the Wayland branch, so the working Vulkan/Wayland HDR present path is in
+this tree). The six commits this branch adds on top are **documentation
+only — no code changes**; everything below `48858444 docs: complete HDR
+Wayland / GPU interop field notes` is the Wayland implementation.
 
-Related: `alexfry/arch-qt611-wayland-build` (the working Wayland HDR
-implementation), `alexfry/imagescope` (macOS-native EDR viewer used as prior
-art — `MetalEDRImageView.swift`, `DisplaySurfaceMapping.swift`, and a copy of
-the ACES 2.0 config).
+`_hdr_test/` therefore holds both the design docs and the pre-existing Wayland
+notes, README, and test wedge material (`hdr_wedge_1080.exr`,
+`hdr_white_step1.exr`, `write_hdr_exr.cpp`).
+
+Related: `alexfry/imagescope` (macOS-native EDR viewer used as prior art —
+`MetalEDRImageView.swift`, `DisplaySurfaceMapping.swift`, and a copy of the
+ACES 2.0 config).
