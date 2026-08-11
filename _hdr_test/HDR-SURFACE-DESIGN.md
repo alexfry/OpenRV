@@ -82,10 +82,44 @@ named  →  parametric  →  synthesized ICC  →  approximate + residual shader
 
 ---
 
+## 1.5 Who decides what
+
+Three roles, and keeping them separate is the whole design:
+
+| Role | Owns | Does **not** own |
+|---|---|---|
+| **OCIO display colorspace** (session color pipeline) | *What the numbers in the buffer mean.* This **is** the surface descriptor — 1:1, derived, not independently chosen. | Whether the platform can express it |
+| **Device / platform** | *Capability* (is this descriptor expressible exactly, approximately, not at all? what is the EDR headroom? what does the display prefer?) and *policy* (color-managed vs pass-through; which fallback is acceptable) | Which color space the image is in |
+| **ColorSync / compositor** | Surface tag → panel | Everything upstream |
+
+The surface tag therefore **follows the color pipeline**, and changes whenever
+the user changes OCIO display or view. It is dynamic session state, not a
+static device preference.
+
+The device's legitimate influence runs the other way: capability should
+**filter or recommend** the OCIO display list (offering `Rec.2100-PQ` on an
+SDR panel is legal but pointless), and the chosen display then determines the
+surface. Recommendation is advisory; it must never silently override the
+user's display choice.
+
+One genuinely device-level decision survives, and it is not "which color
+space": **management policy** — color-managed (tag truthfully, let ColorSync
+or the compositor convert) versus pass-through (send code values untouched to
+a calibrated display, the traditional DI model). That is a per-device,
+per-facility preference and belongs in device state.
+
+Performance corollary: **re-tagging is cheap, reformatting is not.** Changing
+`CAMetalLayer.colorspace` or attaching a new Wayland image description costs
+nothing; changing buffer format (RGBA8 ↔ RGBA16F) rebuilds the swapchain.
+Group the canonical spaces by required buffer format and only rebuild when a
+display change crosses a format boundary.
+
+---
+
 ## 2. Canonical buffer-space vocabulary
 
-Platform-neutral IDs. This is the whole user-visible vocabulary; everything
-else is a resolution detail.
+Platform-neutral IDs. This is not an independent user-facing menu — it is the
+platform-expressible image of the config's display colorspaces (§2.1).
 
 | ID | Primaries / white | Transfer | Range | Notes |
 |---|---|---|---|---|
@@ -120,6 +154,42 @@ Chromaticities are **always** explicit even when a named platform primary
 exists — that is what lets the resolver decide "named `srgb` is bit-exact for
 this" versus "must go parametric/ICC", and it is what the residual matrix is
 computed from.
+
+### 2.1 Validation against ACES 2.0 (`studio-config-v4.0.0_aces-v2.0_ocio-v2.5`)
+
+The nine active displays in the ACES 2.0 studio config, and how they resolve.
+Note the **second alias** of each display colorspace follows a rigorous
+`<transfer>_<primaries>_display` convention, and `encoding:` gives the range
+class — so the descriptor is derivable from the config *today*, without
+waiting for OCIO #1996.
+
+| OCIO display | Structured alias | `encoding` | Canonical id | Wayland | macOS |
+|---|---|---|---|---|---|
+| `sRGB - Display` | `srgb_rec709_display` | sdr-video | `srgb` | named `srgb` + `compound_power_2_4` | named `sRGB` |
+| `Gamma 2.2 Rec.709 - Display` | `g22_rec709_display` | sdr-video | `rec709-g22` | named `srgb` + `gamma22` | calibrated γ2.2 |
+| `Display P3 - Display` | `srgb_p3d65_display` | sdr-video | `display-p3` | named `display_p3` + `compound_power_2_4` | named `displayP3` |
+| `Display P3 HDR - Display` | `srgbe_p3d65_display` | **edr-video** | `display-p3-ext` | `display_p3` + ext transfer | named `extendedDisplayP3` |
+| `P3-D65 - Display` | `g26_p3d65_display` | sdr-video | `p3d65-g26` | `display_p3` + `set_tf_power(2.6)` | `createP3D65ColorSpace()` |
+| `Rec.1886 Rec.709 - Display` | `g24_rec709_display` | sdr-video | `rec709-bt1886` | named `srgb` + **`bt1886`** | `createBT1886ColorSpace()` |
+| `Rec.2100-HLG - Display` | `hlg_rec2020_display` | hdr-video | `rec2100-hlg` | named `bt2020` + `hlg` | named `itur_2100_HLG` |
+| `Rec.2100-PQ - Display` | `pq_rec2020_display` | hdr-video | `rec2100-pq` | named `bt2020` + `st2084_pq` | named `itur_2100_PQ` |
+| `ST2084-P3-D65 - Display` | `pq_p3d65_display` | hdr-video | `p3d65-pq` | named `display_p3` + `st2084_pq` | ICC or calibrated + PQ |
+
+Observations:
+
+- The mapping is **1:1 and near-total**. The canonical vocabulary was not
+  invented independently — it is what the config already describes.
+- Every SDR/HDR case resolves to **named** primitives on Wayland and named or
+  calibrated on macOS. `set_tf_power` (feature-gated) is needed only for γ2.6.
+- `Display P3 HDR` / `srgbe_p3d65_display` / `edr-video` is *literally* the
+  macOS EDR surface — the ACES config already ships a display designed for it.
+- `encoding:` (`sdr-video`, `hdr-video`, `edr-video`, `display-linear`) maps
+  directly onto the descriptor's `range` field.
+- Views do **not** affect the surface tag — `ACES 2.0 - HDR 1000 nits (P3 D65)`
+  and `Un-tone-mapped` on the same display produce different pixels in the
+  same encoding. Views change tone mapping; displays change encoding. Only the
+  display drives re-tagging. (Views *do* inform luminance metadata — see
+  `set_mastering_luminance` / `CAEDRMetadata`.)
 
 ---
 
@@ -287,19 +357,33 @@ things this design needs, and has no concrete API yet:
 1. display color spaces carrying enough metadata to apply an OS surface tag;
 2. an API to negotiate between config tags and what the OS/display supports.
 
-So build the selector with **three interchangeable providers behind one
-interface**, newest-wins:
+What #1996 does **not** change: the display colorspace is defined by a
+*transform* (CIE XYZ-D65 → display encoding), not by declarative
+primaries/transfer metadata. You cannot mechanically read "BT.709 primaries,
+γ2.4" out of the config. What you *can* read — and what §2.1 shows is
+sufficient in practice — is the **standardized alias** and the `encoding:`
+field.
 
-| Tier | Source of truth | Status |
+So the derivation runs as a **precedence chain**, first hit wins:
+
+| Precedence | Source | Status |
 |---|---|---|
-| 1 (now) | **Rules file**: user-editable JSON, regex on OCIO display/view name → surface id, first match wins, plus fallback | ImageScope's `DisplaySurfaceMapping.swift`, proven — copy the model outright |
-| 2 (soon) | Config-level metadata if present — e.g. a `display_colorspaces` block or per-display-colorspace key naming a canonical id | Speculative until #1996 lands; read-if-present, ignore-if-absent |
-| 3 (later) | OCIO negotiation API: hand OCIO our `SurfaceCapabilities`, get back the view + tag it wants | Requires #1996 |
+| 1 | **Explicit user override** for this display (pinned in prefs) | Always wins; the escape hatch |
+| 2 | **Declared metadata** — primaries/transfer published by OCIO | Requires #1996; read-if-present, ignore-if-absent |
+| 3 | **Standard alias + `encoding`** — `g24_rec709_display` → descriptor, via a table shipped with RV | **Works today** with every ACES 2.0 built-in config |
+| 4 | **Name-pattern rules file** — user-editable JSON, regex on display name, first match wins | Fallback for custom/legacy configs; ImageScope's `DisplaySurfaceMapping.swift` model |
+| 5 | **Default** (`srgb`) + loud log | Last resort |
+
+Tier 3 is the important correction to the first draft of this document: the
+alias vocabulary is structured and stable, so the interim mechanism is a
+*deterministic lookup table shipped with RV*, not studio-authored policy.
+Tier 4 remains valuable but is demoted to handling configs that don't follow
+the convention.
 
 The `SurfaceCapabilities` struct is worth designing carefully now — it is
-precisely what tier 3 would hand to OCIO, and having a real implementation on
-two platforms is the strongest possible contribution to that discussion.
-Suggest taking it to the OCIO issue once the rules-file tier is working.
+precisely what a tier-2 negotiation API would consume, and a real
+implementation across two platforms is the strongest possible contribution to
+that discussion. Worth taking to the OCIO issue once tier 3 is working.
 
 The stock (non-OCIO) path maps through `DisplayIPNode` the same way: its
 output encoding determines the surface id, replacing the current
@@ -309,54 +393,54 @@ output encoding determines the surface id, replacing the current
 
 ## 8. UI strategy — recommendation
 
-**Hybrid: native for the mechanism and the device-level control, an optional
-package for policy and diagnostics.** Rationale below, then the concrete split.
+**There is no "Output Color Space" picker.** That is the main UI consequence
+of §1.5, and it makes the UI much smaller than a first pass suggests.
 
-The single most useful framing: **the surface space is a property of the
-output device, not of the session's color pipeline.** RV already models
-per-device state — `VideoDevice` has `dataFormatAtIndex()`/`setDataFormat()`
-and a `ColorProfile`, and `DisplayGroupIPNode::setPhysicalVideoDevice()`
-already publishes `device.systemProfileURL` / `device.systemProfileType` into
-session properties. Surface space slots straight into that existing model,
-which means it survives presentation-mode switches, works per-display, and
-appears where users already look for output settings.
+The user already has the control that selects the surface: the **OCIO display**
+(`View → Display` / the display+view menus RV ships today). Adding a second
+picker would create two controls that can silently disagree — and the failure
+mode of disagreement is a double-transformed image that looks plausible but
+is wrong, which is the single worst outcome in a review tool. The surface tag
+must be **derived and shown**, not independently chosen.
 
-| Option | Pros | Cons | Verdict |
-|---|---|---|---|
-| Pure native UI | Discoverable, matches device model | Every policy tweak = C++ rebuild; big upstream diff; studios can't override | Too rigid alone |
-| Pure package | Fast iteration, studio-overridable | Can't own device state; no natural home in Preferences; needs C++ commands anyway | Insufficient alone |
-| **Hybrid** | Right thing in the right place | Two pieces to keep in sync | **Recommended** |
+So the UI splits into three things, none of which is a color-space menu:
 
-Concretely:
+1. **Status (always visible enough to trust).** What the image plane is
+   currently tagged as, and how faithfully: `Rec.1886 Rec.709 → bt1886 ·
+   Exact` or `Rec.2100-PQ → extended-linear P3 · Approximate (no PQ surface;
+   decoding in present shader)`. A non-identity residual transform is a
+   warning state and must be visible — it means the display chain is doing
+   math the color pipeline didn't ask for.
+2. **Override (rare, per display, sticky).** For when derivation is wrong,
+   the config is non-standard, or a fallback needs pinning. This is the only
+   place a canonical id is user-selectable, and it should read as an
+   override — showing the derived value it replaces.
+3. **Device policy (per device, genuinely device-level).** Color-managed vs
+   pass-through, and the fallback preference. This *is* device state and
+   belongs in Preferences → Video alongside the existing data-format and
+   color-profile settings.
 
-1. **Core (C++)** — `VideoDevice` gains `availableSurfaceSpaces()`,
-   `currentSurfaceSpace()`, `setSurfaceSpace(id)`, `surfaceCapabilities()`.
-   `DisplayGroupIPNode` publishes `device.outputColorSpace`,
-   `device.outputColorSpaceExactness`, `device.residualTransform`,
-   `device.edrHeadroom`, `device.preferredSurfaceSpace` as session
-   properties — scriptable and serializable for free.
-2. **Native UI (small)** — one combo box in Preferences → Video ("Output
-   Color Space") listing the device's available spaces, plus a read-only
-   capability line ("Exact — named bt1886" / "Approximate — no PQ surface,
-   decoding in present shader"). One dialog's worth of diff.
-3. **Commands** — `setOutputColorSpace`, `outputColorSpaces`,
-   `outputColorSpaceInfo` in `CommandsModule` (Mu + Python, as usual).
-4. **Package** `display_surface_tools` (optional, default-enabled) — where
-   the fast-moving parts live:
-   - `Display → Output Color Space →` radio menu, incl. **Auto (from OCIO
-     display)**;
-   - the rules-file editor (tier-1 selector above);
-   - a diagnostics HUD: live EDR headroom / preferred description, active
-     tag, exactness, residual-transform warning, buffer format, interop
-     on/off — this is the thing that makes bring-up and support tractable;
-   - hotkey A/B cycling between two spaces for eyeball comparison.
-   Persist with `commands.writeSettings`, exactly like
-   `custom_lut_menu_mode`.
-5. **Env override** — `RV_OUTPUT_COLORSPACE=rec709-bt1886` for CI, headless
-   and bring-up; `RV_HDR_PRESENT` kept as a deprecated alias for a release.
+### Where each piece lives
 
-Precedence: env override → explicit user/session choice → rules file →
-device default.
+| Piece | Home | Why |
+|---|---|---|
+| Derivation, capability query, tagging | **Core C++** | Must run on every display change, before first frame |
+| Session properties | **Core C++** | `DisplayGroupIPNode` already publishes `device.systemProfileURL`/`device.systemProfileType`; add `device.outputColorSpace`, `.exactness`, `.residualTransform`, `.edrHeadroom`, `.preferredSurfaceSpace`. Scriptable and serializable for free |
+| Device policy (managed/pass-through, fallback pref) | **Native — Preferences → Video** | Genuinely per-device; sits with `dataFormatAtIndex()`/`ColorProfile` |
+| Commands (`outputColorSpaceInfo`, `setOutputColorSpaceOverride`, …) | **Core C++** → Mu/Python | Needed by any UI, native or package |
+| Status readout, override menu, diagnostics HUD, rules-file editor, A/B hotkeys | **Package** `display_surface_tools` | Iterates weekly during bring-up; studio-replaceable; `commands.writeSettings` for persistence, like `custom_lut_menu_mode` |
+
+The package earns its place on the diagnostics alone: live EDR headroom,
+compositor-preferred description, active tag, exactness, residual warning,
+buffer format, interop on/off. That panel is what makes bring-up and later
+support tractable, and it is exactly the kind of thing that should not require
+a C++ rebuild to change.
+
+**Env override** — `RV_OUTPUT_COLORSPACE=rec709-bt1886` for CI, headless and
+bring-up; `RV_HDR_PRESENT` kept as a deprecated alias for a release.
+
+Full precedence (matching §7): env override → per-display user override →
+OCIO declared metadata → standard alias → rules file → default.
 
 ---
 
@@ -383,7 +467,7 @@ device default.
 | **1** | `TwkSurfaceSpace` lib + canonical registry + data-driven present shader; port the four existing Wayland modes onto it with no behavior change. Pure refactor, testable on Linux alone. | 4–6 days |
 | **2** | `ISurfaceTagger` + Wayland backend (named + parametric + feature query + feedback). `rec709-bt1886` working on Linux. | 4–6 days |
 | **3** | macOS backend: QRhi Metal path, Cocoa tagger, `GlMtlSharedImage` (IOSurface). `rec709-bt1886` and `display-p3-ext` working on macOS. | 6–10 days |
-| **4** | ICC synthesis tier; UI (device property + Preferences combo + commands + package with HUD and rules file). | 5–8 days |
+| **4** | ICC synthesis tier; UI (derivation + session properties + device policy in Preferences + commands + package with status/override/HUD). | 5–8 days |
 | **5** | Docs, A/B recipes for both platforms, take `SurfaceCapabilities` to OCIO #1996. | 2–3 days |
 
 Phases 1–2 are useful on their own on Linux; phase 3 is the macOS payoff;
