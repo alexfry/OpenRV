@@ -317,3 +317,23 @@ notes, README, and test wedge material (`hdr_wedge_1080.exr`,
 Related: `alexfry/imagescope` (macOS-native EDR viewer used as prior art —
 `MetalEDRImageView.swift`, `DisplaySurfaceMapping.swift`, and a copy of the
 ACES 2.0 config).
+
+Remotes: `origin` is the `alexfry/OpenRV` fork; `upstream` is
+`AcademySoftwareFoundation/OpenRV`. All work here targets the fork.
+
+### Candidates to break out for upstream — later, not now
+
+Two commits are plain build fixes with no HDR dependency. They cherry-pick onto
+`main` cleanly without dragging any of the present-surface work along, and both
+affect people who are not doing HDR at all:
+
+| Commit | Fix | Who it affects |
+|---|---|---|
+| `e2ae676c` | libclang fallback for modern Xcode (`make_pyside6.py`) | any macOS build on Xcode ≥ 26 — the derived URL 404s and fails with a misleading "not a 7z file" |
+| `75587b14` | disable OIIO's Nuke plugins (`oiio.cmake`) | **any platform**, any developer with Nuke installed — OIIO auto-detects it and its plugin CMakeLists fails to configure |
+
+A third, `cc6f290d` (Vulkan present path confined to Linux), is only meaningful
+alongside the Wayland work, so it is not an upstream candidate on its own.
+
+Not raised upstream yet. Do this as a separate branch off `main` when there is
+appetite — do not let it block the HDR work.
