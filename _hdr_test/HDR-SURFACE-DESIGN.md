@@ -368,22 +368,104 @@ So the derivation runs as a **precedence chain**, first hit wins:
 
 | Precedence | Source | Status |
 |---|---|---|
-| 1 | **Explicit user override** for this display (pinned in prefs) | Always wins; the escape hatch |
-| 2 | **Declared metadata** — primaries/transfer published by OCIO | Requires #1996; read-if-present, ignore-if-absent |
-| 3 | **Standard alias + `encoding`** — `g24_rec709_display` → descriptor, via a table shipped with RV | **Works today** with every ACES 2.0 built-in config |
-| 4 | **Name-pattern rules file** — user-editable JSON, regex on display name, first match wins | Fallback for custom/legacy configs; ImageScope's `DisplaySurfaceMapping.swift` model |
-| 5 | **Default** (`srgb`) + loud log | Last resort |
+| 1 | **Env override** — `RV_OUTPUT_COLORSPACE` | CI, headless, bring-up |
+| 2 | **Per-display user override** set in the UI, pinned in prefs | The in-session escape hatch |
+| 3 | **Mapping file** (§7.1) — config-adjacent, then user, then site | **The general answer for arbitrary configs** |
+| 4 | **Declared metadata** — primaries/transfer published by OCIO | Requires #1996; read-if-present, ignore-if-absent |
+| 5 | **Standard alias + `encoding`** — `g24_rec709_display` → descriptor, via a table shipped with RV | Works today with ACES 2.0 built-in configs |
+| 6 | **Default** (`srgb`) + loud log | Last resort |
 
-Tier 3 is the important correction to the first draft of this document: the
-alias vocabulary is structured and stable, so the interim mechanism is a
-*deterministic lookup table shipped with RV*, not studio-authored policy.
-Tier 4 remains valuable but is demoted to handling configs that don't follow
-the convention.
+Note tier 3 sits **above** both automatic mechanisms. Alias derivation is a
+good guess about a well-formed config; a mapping line is a human being stating
+what a display actually is. The human wins. When #1996 lands, tier 4 makes
+most mapping files unnecessary — it does not make them wrong.
 
 The `SurfaceCapabilities` struct is worth designing carefully now — it is
-precisely what a tier-2 negotiation API would consume, and a real
+precisely what a tier-4 negotiation API would consume, and a real
 implementation across two platforms is the strongest possible contribution to
-that discussion. Worth taking to the OCIO issue once tier 3 is working.
+that discussion.
+
+### 7.1 The mapping file
+
+Assume the config is **not** well-named — that is the common case outside the
+built-in ACES configs. In-house show configs, ACES 1.x holdovers and vendor
+configs all carry names like `SHOW_Rec709_Gamma24` or `Client Review (sRGB)`
+that no derivation rule will ever crack. The mapping file is therefore not a
+fallback, it is the mechanism; alias derivation is just a very good default
+that keeps the file empty for configs that don't need it.
+
+Deliberately a plain text file, per the simplicity steer:
+
+```
+# rv_surface_map.csv — OCIO display → present surface
+#   <display name, alias, or glob> , <surface id>
+# Split on the LAST comma, so display names may contain commas.
+# Blank lines and # comments ignored. Matching is case-insensitive.
+# Exact matches beat globs regardless of line order; among globs, first wins.
+
+# in-house show config — names derivation cannot crack
+SHOW_Rec709_Gamma24,        rec709-bt1886
+SHOW_P3_Theatre,            dcip3-g26
+SHOW_HDR_PQ_1000,           rec2100-pq
+Client Review (sRGB),       srgb
+
+# families
+*_HLG*,                     rec2100-hlg
+*ST2084*,                   p3d65-pq
+
+# opt out of OS colour management for a calibrated device
+Calibrated_DI_Projector,    passthrough
+
+# force re-derivation for one display, overriding a glob above
+Display P3 HDR - Display,   auto
+```
+
+Design points, each earning its keep:
+
+- **Split on the last comma.** Surface ids never contain commas, display names
+  might. This keeps the format comma-separated as intended without quoting
+  rules.
+- **Match against display name *and* its aliases**, so a half-standard config
+  can be keyed either way.
+- **Glob, not regex.** A mistyped regex silently mismatches, and a silent
+  mismatch here means a wrongly-tagged image — the exact failure this whole
+  design exists to prevent. `*` covers the real cases. (ImageScope uses regex;
+  if parity matters, allow `re:` as an explicit prefix rather than making
+  regex the default.)
+- **Exact beats glob regardless of order**, so adding one specific line never
+  requires reordering the file.
+- **Pseudo-ids**: `auto` (force re-derivation), `passthrough` (no OS
+  conversion — send code values to a calibrated device).
+- **Sparse.** It is an override table layered on derivation, not an exhaustive
+  list. A config that is 80% conventional needs two lines.
+
+**Search path, most specific first** — the important one is the first:
+
+| Location | Purpose |
+|---|---|
+| `<dir of the .ocio config>/rv_surface_map.csv` | **The mapping travels with the config.** Whoever authored the show config authors its mapping once, and every artist gets it for free |
+| `$RV_SURFACE_MAP` (path list) | Site/pipeline injection |
+| `~/.rv/rv_surface_map.csv` | Personal |
+| Built-in table | ACES 2.0 alias derivation |
+
+Config-adjacent placement is the answer to "we can't assume all configs are
+nice": the fix lives next to the thing that was named badly, is version
+controlled with it, and ships with it.
+
+**Two usability requirements**, both cheap and both non-optional:
+
+1. **Template export.** A command / menu item that writes a starter file
+   pre-populated with every display in the current config, each with its
+   aliases, the derived guess, and the exactness, as comments. Nobody should
+   ever author this file from scratch or have to guess at spelling.
+2. **Loud validation.** An unknown surface id at load fails that line
+   visibly, naming the file, the line number and the valid ids. Never
+   silently fall through to `srgb` — a silently wrong tag is worse than a
+   startup error.
+
+Optional later, not in v1: a third field for luminance metadata
+(`mastering nits`) keyed off the **view** rather than the display, feeding
+`set_mastering_luminance` / `CAEDRMetadata`.
 
 The stock (non-OCIO) path maps through `DisplayIPNode` the same way: its
 output encoding determines the surface id, replacing the current
@@ -428,7 +510,8 @@ So the UI splits into three things, none of which is a color-space menu:
 | Session properties | **Core C++** | `DisplayGroupIPNode` already publishes `device.systemProfileURL`/`device.systemProfileType`; add `device.outputColorSpace`, `.exactness`, `.residualTransform`, `.edrHeadroom`, `.preferredSurfaceSpace`. Scriptable and serializable for free |
 | Device policy (managed/pass-through, fallback pref) | **Native — Preferences → Video** | Genuinely per-device; sits with `dataFormatAtIndex()`/`ColorProfile` |
 | Commands (`outputColorSpaceInfo`, `setOutputColorSpaceOverride`, …) | **Core C++** → Mu/Python | Needed by any UI, native or package |
-| Status readout, override menu, diagnostics HUD, rules-file editor, A/B hotkeys | **Package** `display_surface_tools` | Iterates weekly during bring-up; studio-replaceable; `commands.writeSettings` for persistence, like `custom_lut_menu_mode` |
+| Mapping-file load + search path (§7.1) | **Core C++** | Needed before first frame; must work headless in `rvio` |
+| Status readout, override menu, diagnostics HUD, mapping-template export, A/B hotkeys | **Package** `display_surface_tools` | Iterates weekly during bring-up; studio-replaceable; `commands.writeSettings` for persistence, like `custom_lut_menu_mode` |
 
 The package earns its place on the diagnostics alone: live EDR headroom,
 compositor-preferred description, active tag, exactness, residual warning,
@@ -465,9 +548,9 @@ OCIO declared metadata → standard alias → rules file → default.
 |---|---|---|
 | **0** | Spikes: (a) Linux — can we tag a QRhi-created Vulkan surface ourselves, or do we need `PASS_THROUGH`? (b) macOS — `createWindowContainer` overlay over a live `QOpenGLWidget`. Both are go/no-go on architecture. | 2–3 days |
 | **1** | `TwkSurfaceSpace` lib + canonical registry + data-driven present shader; port the four existing Wayland modes onto it with no behavior change. Pure refactor, testable on Linux alone. | 4–6 days |
-| **2** | `ISurfaceTagger` + Wayland backend (named + parametric + feature query + feedback). `rec709-bt1886` working on Linux. | 4–6 days |
+| **2** | `ISurfaceTagger` + Wayland backend (named + parametric + feature query + feedback), plus the mapping file (§7.1) and template export. `rec709-bt1886` working on Linux from both a standard and a badly-named config. | 5–7 days |
 | **3** | macOS backend: QRhi Metal path, Cocoa tagger, `GlMtlSharedImage` (IOSurface). `rec709-bt1886` and `display-p3-ext` working on macOS. | 6–10 days |
-| **4** | ICC synthesis tier; UI (derivation + session properties + device policy in Preferences + commands + package with status/override/HUD). | 5–8 days |
+| **4** | ICC synthesis tier; UI (session properties + device policy in Preferences + commands + package with status/override/HUD/template export). | 5–8 days |
 | **5** | Docs, A/B recipes for both platforms, take `SurfaceCapabilities` to OCIO #1996. | 2–3 days |
 
 Phases 1–2 are useful on their own on Linux; phase 3 is the macOS payoff;
