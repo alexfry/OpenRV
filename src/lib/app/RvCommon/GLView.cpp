@@ -15,6 +15,7 @@
 #include <RvCommon/GLView.h>
 #include <RvCommon/QTGLVideoDevice.h>
 #include <RvCommon/VulkanPresentWidget.h>
+#include <IPCore/DisplayHDRMode.h>
 #include <TwkGLF/GLFence.h>
 #include <RvCommon/InitGL.h>
 #include <RvCommon/RvDocument.h>
@@ -58,34 +59,16 @@ namespace Rv
         // Goal 2: on-screen HDR / extended-range. Activated by RV_HDR=1 (or
         // true/yes/on). Prefer native Wayland so Qt can use
         // wp_color_management_v1; XWayland still clamps most clients as SDR.
-        bool wantHdrDisplay()
-        {
-            const char* e = getenv("RV_HDR");
-            if (!e || !*e)
-                return false;
-            if (!strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off") || !strcmp(e, "no"))
-                return false;
-            return true;
-        }
+        // Backed by IPCore's shared display state so the pipeline encoding, the
+        // GL surface tag and the present surface cannot disagree. RV_HDR still
+        // seeds it — see IPCore/DisplayHDRMode.h.
+        bool wantHdrDisplay() { return IPCore::displayHDREnabled(); }
 
-        // Must stay in sync with DisplayIPNode::wantP3ExtendedEncoding(): that
-        // decides what goes *into* the buffer, this decides how the surface is
-        // tagged. See the comment there for the platform defaults.
+        // Same source of truth as DisplayIPNode's encoding choice, so the
+        // buffer contents and the surface tag cannot drift apart.
         bool wantP3ExtendedEncoding()
         {
-            const char* e = getenv("RV_HDR_ENCODING");
-            if (e && *e)
-            {
-                if (!strcasecmp(e, "p3extended") || !strcasecmp(e, "p3"))
-                    return true;
-                if (!strcasecmp(e, "pq") || !strcasecmp(e, "st2084"))
-                    return false;
-            }
-#ifdef PLATFORM_DARWIN
-            return true;
-#else
-            return false;
-#endif
+            return IPCore::displayHDRMode() == IPCore::DisplayHDRMode::P3Extended;
         }
 
         bool envFlagOn(const char* name)

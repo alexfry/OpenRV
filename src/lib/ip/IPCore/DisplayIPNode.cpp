@@ -6,6 +6,7 @@
 //
 //******************************************************************************
 #include <IPCore/DisplayIPNode.h>
+#include <IPCore/DisplayHDRMode.h>
 #include <IPCore/Exception.h>
 #include <IPCore/ShaderCommon.h>
 #include <ImfRgbaYca.h>
@@ -36,43 +37,16 @@ namespace IPCore
         // a Wayland surface color space of Bt2100Pq (see GLView/main), Hyprland
         // can show absolute nits. The PQ shader expects linear input as nits/100
         // (1.0 = 100 nits); values >1 map above that (e.g. 10.0 → 1000 nits).
-        bool wantHdrDisplay()
-        {
-            const char* e = getenv("RV_HDR");
-            if (!e || !*e)
-                return false;
-            if (!strcmp(e, "0") || !strcmp(e, "false") || !strcmp(e, "off") || !strcmp(e, "no"))
-                return false;
-            return true;
-        }
+        // Now backed by IPCore's shared display state rather than reading
+        // RV_HDR directly, so the preference and the env var agree. The env var
+        // still seeds it — see DisplayHDRMode.cpp.
+        bool wantHdrDisplay() { return displayHDREnabled(); }
 
-        // Which encoding the HDR display path emits.
-        //
-        //   p3extended  Display P3 primaries + piecewise sRGB TF, values free to
-        //               exceed 1.0. This is the macOS EDR surface model
-        //               (kCGColorSpaceExtendedLinearDisplayP3), and it pairs with
-        //               OCIO's "Display P3 - Display" / Un-tone-mapped.
-        //   pq          SMPTE-2084. What an HDR10 swapchain wants; the Wayland
-        //               present path is built around it.
-        //
-        // Default per platform: macOS has no HDR10/PQ swapchain through Qt's
-        // Metal backend, so PQ there means encoding to a format nothing can
-        // present. Override with RV_HDR_ENCODING=pq|p3extended.
+        // Which encoding the HDR display path emits. See DisplayHDRMode.h;
+        // RV_HDR_ENCODING seeds it, the preference overrides it.
         bool wantP3ExtendedEncoding()
         {
-            const char* e = getenv("RV_HDR_ENCODING");
-            if (e && *e)
-            {
-                if (!strcasecmp(e, "p3extended") || !strcasecmp(e, "p3"))
-                    return true;
-                if (!strcasecmp(e, "pq") || !strcasecmp(e, "st2084"))
-                    return false;
-            }
-#ifdef PLATFORM_DARWIN
-            return true;
-#else
-            return false;
-#endif
+            return displayHDRMode() == DisplayHDRMode::P3Extended;
         }
     } // namespace
 

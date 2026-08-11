@@ -29,6 +29,8 @@ SET(_target
 
 SET(_sources
     BrushTextureManager.cpp
+    # NB: not picked up by the *IPNode.cpp glob further down.
+    DisplayHDRMode.cpp
     Session.cpp
     Exception.cpp
     IPNode.cpp

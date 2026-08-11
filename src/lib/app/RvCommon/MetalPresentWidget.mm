@@ -5,6 +5,8 @@
 #include <RvCommon/MetalPresentWidget.h>
 #include <RvCommon/IOSurfaceSharedImage.h>
 
+#include <IPCore/DisplayHDRMode.h>
+
 #include <rhi/qrhi.h>
 
 #include <QEvent>
@@ -489,9 +491,9 @@ namespace Rv
             int mode = 0;
             if (m_hdr && m_edrSurface)
             {
-                const char* enc = getenv("RV_HDR_ENCODING");
-                const bool pq = enc && *enc
-                                && (!strcasecmp(enc, "pq") || !strcasecmp(enc, "st2084"));
+                // Same shared state DisplayIPNode used to encode the buffer, so
+                // the decoder cannot disagree with the encoder.
+                const bool pq = IPCore::displayHDRMode() == IPCore::DisplayHDRMode::PQ;
                 mode = int(envFloat("RV_MACOS_PRESENT_MODE", pq ? 2.f : 3.f));
             }
 
