@@ -24,7 +24,12 @@
 #include <GL/glew.h>
 #endif
 #include <RvCommon/GLView.h> // WINDOWS: include AFTER other stuff
+#include <RvCommon/PresentSurface.h>
+#ifdef PLATFORM_DARWIN
+#include <RvCommon/MetalPresentWidget.h>
+#else
 #include <RvCommon/VulkanPresentWidget.h>
+#endif
 #include <QGuiApplication>
 #include <QCoreApplication>
 #include <RvCommon/DiagnosticsView.h>
@@ -223,30 +228,60 @@ namespace Rv
         m_stackedLayout->setStackingMode(QStackedLayout::StackAll);
         m_stackedLayout->addWidget(m_glView);
 
-        // Wayland: embed a Vulkan subsurface over the GL view via
-        // createWindowContainer. Separate QWindow (own graphics API) but the
-        // same top-level client — Hyprland tiles one RV window, not two.
+        // Embed a platform present surface over the GL view via
+        // createWindowContainer: a separate QWindow with its own graphics API
+        // and its own colour-managed swapchain, but the same top-level client
+        // (Hyprland tiles one RV window, not two).
+        //
+        //   Wayland  Vulkan/QRhi     — see VulkanPresentWidget
+        //   macOS    Metal/QRhi EDR  — see MetalPresentWidget
         {
+            const char* hdr = getenv("RV_HDR");
+            const bool hdrOn = hdr && *hdr && strcmp(hdr, "0") && strcmp(hdr, "false")
+                               && strcmp(hdr, "off") && strcmp(hdr, "no");
+
+            const char* forceCpu = getenv("RV_WAYLAND_CPU_PRESENT");
+            const bool cpuOnly = forceCpu && strcmp(forceCpu, "0") && strcmp(forceCpu, "false")
+                                 && strcmp(forceCpu, "off");
+
+            const char* backend = nullptr;
+
+#ifdef PLATFORM_DARWIN
+            // Opt-in for now: the EDR path is new, and without RV_HDR there is
+            // nothing to gain over the plain GL path.
+            const char* forceMetal = getenv("RV_METAL_PRESENT");
+            const bool wantMetal =
+                forceMetal ? (strcmp(forceMetal, "0") && strcmp(forceMetal, "false")
+                              && strcmp(forceMetal, "off"))
+                           : hdrOn;
+            if (wantMetal && !cpuOnly)
+            {
+                m_presentSurfaceWidget = new MetalPresentWidget(m_centralWidget);
+                backend = "Metal/EDR";
+            }
+#else
             const bool onWayland =
                 QGuiApplication::platformName().startsWith(QLatin1String("wayland"));
             const char* forceVk = getenv("RV_VULKAN_PRESENT");
             const bool wantVk =
                 forceVk ? (strcmp(forceVk, "0") && strcmp(forceVk, "false") && strcmp(forceVk, "off"))
                         : onWayland;
-            const char* forceCpu = getenv("RV_WAYLAND_CPU_PRESENT");
-            const bool cpuOnly = forceCpu && strcmp(forceCpu, "0") && strcmp(forceCpu, "false")
-                                 && strcmp(forceCpu, "off");
             if (wantVk && !cpuOnly)
             {
-                m_vulkanPresent = new VulkanPresentWidget(m_centralWidget);
-                const char* hdr = getenv("RV_HDR");
-                const bool hdrOn = hdr && *hdr && strcmp(hdr, "0") && strcmp(hdr, "false")
-                                   && strcmp(hdr, "off") && strcmp(hdr, "no");
-                m_vulkanPresent->setHdrPresent(hdrOn);
+                m_presentSurfaceWidget = new VulkanPresentWidget(m_centralWidget);
+                backend = "Vulkan";
+            }
+#endif
+
+            if (m_presentSurfaceWidget)
+            {
+                if (auto* ps = dynamic_cast<PresentSurface*>(m_presentSurfaceWidget))
+                    ps->setHdrPresent(hdrOn);
                 // Stack on top of GLView (StackAll: later widgets paint above).
-                m_stackedLayout->addWidget(m_vulkanPresent);
-                m_glView->setExternalPresentWidget(m_vulkanPresent);
-                cout << "INFO: Embedded Vulkan present (createWindowContainer subsurface). HDR="
+                m_stackedLayout->addWidget(m_presentSurfaceWidget);
+                m_glView->setExternalPresentWidget(m_presentSurfaceWidget);
+                cout << "INFO: Embedded " << backend
+                     << " present (createWindowContainer subsurface). HDR="
                      << (hdrOn ? "on" : "off") << endl;
             }
         }

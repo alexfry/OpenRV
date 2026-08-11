@@ -86,7 +86,7 @@ ELSE()
 ENDIF()
 
 IF(RV_TARGET_DARWIN)
-  LIST(APPEND _sources DisplayLink.cpp)
+  LIST(APPEND _sources DisplayLink.cpp MetalPresentWidget.mm)
 ENDIF()
 
 IF(RV_TARGET_DARWIN)
