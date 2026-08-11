@@ -48,8 +48,6 @@ SET(_sources
     RvApplication.cpp
     DiagnosticsView.cpp
     GLView.cpp
-    VulkanPresentWidget.cpp
-    GlVkSharedImage.cpp
     TwkQTAction.cpp
     MediaDirModel.cpp
     RvNetworkDialog.cpp
@@ -65,6 +63,27 @@ SET(_sources
 )
 
 # IF(RV_TARGET_DARWIN) LIST(APPEND _sources CGDesktopVideoDevice.cpp CGDesktopVideoDeviceArm.cpp DisplayLink.cpp) ENDIF()
+
+# The Vulkan/QRhi present surface is Linux-only. VulkanPresentWidget.cpp and
+# GlVkSharedImage.cpp include <vulkan/vulkan.h> unconditionally, and the GL↔Vk
+# interop is built on POSIX fd external memory (vkGetMemoryFdKHR /
+# VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT / glImportMemoryFdEXT), which has
+# no macOS or Windows equivalent — the macOS path is IOSurface, a separate
+# backend. See _hdr_test/HDR-SURFACE-DESIGN.md.
+#
+# VulkanPresentWidget.h itself is Vulkan-free (QRhi types are forward-declared
+# only), so it compiles everywhere. Off Linux we build a stub implementation
+# instead: RvDocument only constructs the widget when the Qt platform plugin is
+# wayland, so nothing ever instantiates it, and GLView's qobject_cast yields
+# nullptr. That keeps GLView.cpp and RvDocument.cpp free of platform #ifdefs.
+IF(RV_TARGET_LINUX)
+  LIST(APPEND _sources VulkanPresentWidget.cpp GlVkSharedImage.cpp)
+ELSE()
+  # The header is listed too so AUTOMOC still generates the Q_OBJECT glue that
+  # qobject_cast<VulkanPresentWidget*> needs; the basename no longer matches a
+  # compiled source, so AUTOMOC would otherwise skip it.
+  LIST(APPEND _sources VulkanPresentWidgetStub.cpp RvCommon/VulkanPresentWidget.h)
+ENDIF()
 
 IF(RV_TARGET_DARWIN)
   LIST(APPEND _sources DisplayLink.cpp)
@@ -377,6 +396,20 @@ IF(RV_VFX_PLATFORM STRGREATER_EQUAL CY2024)
           TARGET_INCLUDE_DIRECTORIES(${_target} PRIVATE ${_ver} ${_ver}/QtGui)
         ENDFOREACH()
       ENDIF()
+      # macOS framework layout puts the versioned private root directly under
+      # the framework Headers dir instead: QtGui.framework/Headers/6.x.x/QtGui.
+      # (The glob above cannot find it — "${_inc}/QtGui" is the module umbrella
+      # *header file* there, not a directory.)
+      FILE(
+        GLOB _qt_gui_fw_ver_dirs
+        LIST_DIRECTORIES true
+        "${_inc}/6.*"
+      )
+      FOREACH(_ver ${_qt_gui_fw_ver_dirs})
+        IF(IS_DIRECTORY "${_ver}/QtGui")
+          TARGET_INCLUDE_DIRECTORIES(${_target} PRIVATE ${_ver} ${_ver}/QtGui)
+        ENDIF()
+      ENDFOREACH()
     ENDFOREACH()
   ENDIF()
   # System Qt layout: /usr/include/qt6/QtGui/6.11.1/QtGui/rhi/qrhi.h
