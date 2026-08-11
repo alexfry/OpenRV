@@ -68,6 +68,26 @@ namespace Rv
             return true;
         }
 
+        // Must stay in sync with DisplayIPNode::wantP3ExtendedEncoding(): that
+        // decides what goes *into* the buffer, this decides how the surface is
+        // tagged. See the comment there for the platform defaults.
+        bool wantP3ExtendedEncoding()
+        {
+            const char* e = getenv("RV_HDR_ENCODING");
+            if (e && *e)
+            {
+                if (!strcasecmp(e, "p3extended") || !strcasecmp(e, "p3"))
+                    return true;
+                if (!strcasecmp(e, "pq") || !strcasecmp(e, "st2084"))
+                    return false;
+            }
+#ifdef PLATFORM_DARWIN
+            return true;
+#else
+            return false;
+#endif
+        }
+
         bool envFlagOn(const char* name)
         {
             const char* e = getenv(name);
@@ -408,7 +428,11 @@ namespace Rv
             const bool vulkanPresent = preferVulkanPresent() && wantExternalPresent();
             if (tagGl || !vulkanPresent)
             {
-                fmt.setColorSpace(QColorSpace(QColorSpace::Bt2100Pq));
+                // Must match what DisplayIPNode encodes into the buffer, or the
+                // present shader decodes with the wrong transfer.
+                fmt.setColorSpace(wantP3ExtendedEncoding()
+                                      ? QColorSpace(QColorSpace::DisplayP3)
+                                      : QColorSpace(QColorSpace::Bt2100Pq));
             }
         }
 

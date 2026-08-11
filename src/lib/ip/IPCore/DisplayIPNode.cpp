@@ -45,6 +45,35 @@ namespace IPCore
                 return false;
             return true;
         }
+
+        // Which encoding the HDR display path emits.
+        //
+        //   p3extended  Display P3 primaries + piecewise sRGB TF, values free to
+        //               exceed 1.0. This is the macOS EDR surface model
+        //               (kCGColorSpaceExtendedLinearDisplayP3), and it pairs with
+        //               OCIO's "Display P3 - Display" / Un-tone-mapped.
+        //   pq          SMPTE-2084. What an HDR10 swapchain wants; the Wayland
+        //               present path is built around it.
+        //
+        // Default per platform: macOS has no HDR10/PQ swapchain through Qt's
+        // Metal backend, so PQ there means encoding to a format nothing can
+        // present. Override with RV_HDR_ENCODING=pq|p3extended.
+        bool wantP3ExtendedEncoding()
+        {
+            const char* e = getenv("RV_HDR_ENCODING");
+            if (e && *e)
+            {
+                if (!strcasecmp(e, "p3extended") || !strcasecmp(e, "p3"))
+                    return true;
+                if (!strcasecmp(e, "pq") || !strcasecmp(e, "st2084"))
+                    return false;
+            }
+#ifdef PLATFORM_DARWIN
+            return true;
+#else
+            return false;
+#endif
+        }
     } // namespace
 
     static inline Imath::V2f convert(Vec2f v) { return Imath::V2f(v.x, v.y); }
@@ -293,7 +322,9 @@ namespace IPCore
         // keep the path in SDR while the present surface is HDR10.
         if (wantHdrDisplay())
         {
-            overrideColorspace = TwkFB::ColorSpace::SMPTE2084();
+            const bool p3ext = wantP3ExtendedEncoding();
+            overrideColorspace =
+                p3ext ? TwkFB::ColorSpace::sRGB() : TwkFB::ColorSpace::SMPTE2084();
             linear2sRGB = false;
             linear2Rec709 = false;
             displayGamma = 1.0f;
@@ -303,11 +334,18 @@ namespace IPCore
             if (!once)
             {
                 once = true;
-                cerr << "INFO: RV_HDR=1 — image display SMPTE-2084 PQ "
-                        "(linear nits/100: 1.0→100 nits, 4.0→400, 10.0→1000). "
-                        "Present path should use HDR10 swapchain. "
-                        "UI HUD drawn into the same FBO is not image-referred."
-                     << endl;
+                if (p3ext)
+                    cerr << "INFO: RV_HDR=1 — image display Display P3 Extended "
+                            "(piecewise sRGB TF, values may exceed 1.0; 1.0 = SDR white). "
+                            "Present path should use an extended-linear surface. "
+                            "UI HUD drawn into the same FBO is not image-referred."
+                         << endl;
+                else
+                    cerr << "INFO: RV_HDR=1 — image display SMPTE-2084 PQ "
+                            "(linear nits/100: 1.0→100 nits, 4.0→400, 10.0→1000). "
+                            "Present path should use HDR10 swapchain. "
+                            "UI HUD drawn into the same FBO is not image-referred."
+                         << endl;
             }
         }
 
