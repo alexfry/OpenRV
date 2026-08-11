@@ -299,7 +299,7 @@ Beyond the spikes:
 
 ## 6. Branch state
 
-Branch: `claude/macos-edr-display-assessment-hxid10`, branched from
+Branch: `desktop-hdr`, branched from
 `alexfry/arch-qt611-wayland-build` (originally cut from `main` and rebased onto
 the Wayland branch, so the working Vulkan/Wayland HDR present path is in this
 tree). Everything below `48858444 docs: complete HDR Wayland / GPU interop
