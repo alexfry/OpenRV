@@ -122,14 +122,44 @@ content beneath the overlay, so "do clicks reach the widget below" was never
 exercised. A spike passing is not the same as the pattern being complete. Any
 future present-surface spike should put something clickable underneath.
 
+### GPU interop — done, via IOSurface
+
+`RvCommon/IOSurfaceSharedImage.{h,mm}`. GL blits the present FBO into an
+`IOSurfaceRef`; Metal samples the same memory through
+`-newTextureWithDescriptor:iosurface:plane:`, wrapped for QRhi with
+`QRhiTexture::createFrom()`. The `glReadPixels` round trip is gone — it was
+~18.6 MB per frame at 2016x1152 RGBA16F plus a synchronous stall.
+
+It mirrors `GlVkSharedImage`'s shape (`isSupported` / `create` /
+`blitFromFramebuffer` / `sampleTexture`) so the two backends stay comparable,
+and falls back to the CPU path on any failure with a sticky disable.
+`RV_MACOS_GPU_INTEROP=0` forces the old path for A/B.
+
+Two things that were not obvious going in:
+
+- **`CGLTexImageIOSurface2D` only accepts `GL_TEXTURE_RECTANGLE`**, not
+  `GL_TEXTURE_2D`. This turned out not to matter: the GL side only blits into
+  the surface through an FBO and never samples it, so no shader change.
+- **The build needs `-framework IOSurface`** explicitly; Metal and OpenGL
+  arrive via Qt but IOSurface does not.
+
+**A trap for any future macOS-only header in RvCommon:** `CMakeLists.txt` has a
+*manual* moc loop globbing `RvCommon/*.h` on **every** platform, with an
+explicit `LIST(REMOVE_ITEM ...)` for Darwin-only headers. It is separate from
+AUTOMOC. A macOS-only `Q_OBJECT` header not added to that list will moc on
+Linux and fail to link against an implementation that was never compiled.
+
+Synchronisation is currently a `glFlush` plus IOSurface's own coherence. The
+Linux path needed a separate sample image after "layout thrash" turned it
+black; no equivalent seen here, but tearing or stale frames under load would be
+the symptom and the same discipline the fix.
+
+Not measured: the actual speedup. Only the readback's removal is established.
+
 ### Still not done
 
-- **GPU interop.** `ensureGpuInterop()` returns false, so GLView uses its CPU
-  readback path. The IOSurface design below is unimplemented. This is the
-  remaining performance work, and the assessment's effort estimate for it is
-  still untested.
-- **Surface tag driven by the OCIO display.** Currently the encoding is chosen
-  by platform default, not derived from the OCIO display colorspace as
+- **Surface tag driven by the OCIO display.** The encoding is chosen by
+  platform default, not derived from the OCIO display colorspace as
   `HDR-SURFACE-DESIGN.md` requires.
 - **Headroom is measured but unused.** Nothing adapts to it and nothing warns
   when content exceeds it.

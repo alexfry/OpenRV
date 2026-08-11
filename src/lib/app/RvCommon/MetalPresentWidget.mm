@@ -3,6 +3,7 @@
 //******************************************************************************
 
 #include <RvCommon/MetalPresentWidget.h>
+#include <RvCommon/IOSurfaceSharedImage.h>
 
 #include <rhi/qrhi.h>
 
@@ -92,6 +93,96 @@ namespace Rv
         m_hasPendingHalf = true;
         m_hasPending = false;
         requestUpdate();
+    }
+
+    bool MetalPresentWindow::usingGpuInterop() const
+    {
+        return m_gpuInterop && m_shared && m_shared->valid();
+    }
+
+    bool MetalPresentWindow::ensureGpuInterop(QOpenGLContext* glctx, const QSize& pixelSize,
+                                              bool float16)
+    {
+        // Do not create the Metal QRhi from the GL paint path before the window
+        // is exposed; wait for exposeEvent and pick up interop on a later frame.
+        if (!m_rhi || !glctx || !pixelSize.isValid())
+            return false;
+        if (!envOn("RV_MACOS_GPU_INTEROP", true))
+            return false;
+
+        // Sticky disable after a failure, so a broken setup does not get retried
+        // every frame.
+        static bool s_interopFailed = false;
+        if (s_interopFailed)
+        {
+            m_gpuInterop = false;
+            return false;
+        }
+
+        if (!IOSurfaceSharedImage::isSupported(m_rhi, glctx))
+        {
+            static bool once = false;
+            if (!once)
+            {
+                once = true;
+                cout << "INFO: IOSurface GL<->Metal share unavailable; CPU readback present"
+                     << endl;
+            }
+            s_interopFailed = true;
+            m_gpuInterop = false;
+            return false;
+        }
+
+        if (!m_shared)
+            m_shared.reset(new IOSurfaceSharedImage);
+
+        if (!m_shared->create(m_rhi, glctx, pixelSize, float16))
+        {
+            cout << "INFO: IOSurface share create failed; CPU readback present" << endl;
+            s_interopFailed = true;
+            m_gpuInterop = false;
+            m_shared.reset();
+            return false;
+        }
+
+        // The shared surface replaces the uploaded texture as the sample source,
+        // so the pipeline's resource bindings must be rebuilt.
+        if (!m_gpuInterop)
+            m_pipelineBuilt = false;
+        m_gpuInterop = true;
+        return true;
+    }
+
+    bool MetalPresentWindow::blitFromGlFramebuffer(unsigned int srcFbo, int width, int height)
+    {
+        if (!usingGpuInterop())
+            return false;
+        if (!m_shared->blitFromFramebuffer(GLuint(srcFbo), width, height))
+        {
+            static bool once = false;
+            if (!once)
+            {
+                once = true;
+                cout << "INFO: disabling IOSurface interop after failed blit; CPU readback present"
+                     << endl;
+            }
+            m_gpuInterop = false;
+            m_pipelineBuilt = false;
+            return false;
+        }
+        m_sharedDirty = true;
+        return true;
+    }
+
+    void MetalPresentWindow::presentGpuInteropFrame()
+    {
+        if (!usingGpuInterop() || !m_rhi || !isExposed())
+            return;
+        // GL has blitted into the shared surface and flushed; nothing to upload.
+        m_hasPending = false;
+        m_hasPendingHalf = false;
+        renderFrame();
+        m_sharedDirty = false;
     }
 
     void MetalPresentWindow::refreshEdrInfo()
@@ -237,7 +328,13 @@ namespace Rv
 
     void MetalPresentWindow::ensurePipeline()
     {
-        if (!m_rhi || m_pipelineBuilt || !m_tex)
+        if (!m_rhi || m_pipelineBuilt)
+            return;
+
+        // With interop the sample source is the shared IOSurface, not the
+        // texture the CPU path uploads into.
+        QRhiTexture* sampleTex = usingGpuInterop() ? m_shared->sampleTexture() : m_tex.get();
+        if (!sampleTex)
             return;
 
         if (!m_sampler)
@@ -270,7 +367,7 @@ namespace Rv
                                                          | QRhiShaderResourceBinding::FragmentStage,
                                                      m_ubuf.get()),
             QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
-                                                      m_tex.get(), m_sampler.get()),
+                                                      sampleTex, m_sampler.get()),
         });
         if (!m_srb->create())
             return;
@@ -328,7 +425,16 @@ namespace Rv
         QSize texSize = m_texSize;
         bool haveTex = m_tex != nullptr;
 
-        if (m_hasPendingHalf && !m_pendingHalf.empty())
+        if (usingGpuInterop())
+        {
+            // Nothing to upload: GL blitted straight into the shared surface.
+            texSize = m_shared->size();
+            haveTex = true;
+            // The blit is a straight copy from the bottom-up GL FBO, same
+            // orientation as the half-float readback path.
+            m_flipV = 1.f;
+        }
+        else if (m_hasPendingHalf && !m_pendingHalf.empty())
         {
             texSize = QSize(m_pendingHalfW, m_pendingHalfH);
             ensureTexture(texSize, true);
@@ -526,5 +632,20 @@ namespace Rv
     bool MetalPresentWidget::hdrPresent() const { return m_window->hdrPresent(); }
 
     bool MetalPresentWidget::needsFloatTransfer() const { return m_window->hdrPresent(); }
+
+    bool MetalPresentWidget::usingGpuInterop() const { return m_window->usingGpuInterop(); }
+
+    bool MetalPresentWidget::ensureGpuInterop(QOpenGLContext* glctx, const QSize& pixelSize,
+                                              bool float16)
+    {
+        return m_window->ensureGpuInterop(glctx, pixelSize, float16);
+    }
+
+    bool MetalPresentWidget::blitFromGlFramebuffer(unsigned int srcFbo, int width, int height)
+    {
+        return m_window->blitFromGlFramebuffer(srcFbo, width, height);
+    }
+
+    void MetalPresentWidget::presentGpuInteropFrame() { m_window->presentGpuInteropFrame(); }
 
 } // namespace Rv

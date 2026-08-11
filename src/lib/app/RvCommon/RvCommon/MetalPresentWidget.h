@@ -65,6 +65,13 @@ namespace Rv
         // Metal backend reports a hardcoded dummy sdrWhiteLevel of 200.
         float edrHeadroom() const { return m_edrHeadroom; }
 
+        // Zero-copy GL -> Metal path via IOSurface, replacing the glReadPixels
+        // round trip. Mirrors VulkanPresentWindow's fd-based interop.
+        bool usingGpuInterop() const;
+        bool ensureGpuInterop(QOpenGLContext* glctx, const QSize& pixelSize, bool float16);
+        bool blitFromGlFramebuffer(unsigned int srcFbo, int width, int height);
+        void presentGpuInteropFrame();
+
     protected:
         void exposeEvent(QExposeEvent*) override;
         void resizeEvent(QResizeEvent*) override;
@@ -107,6 +114,9 @@ namespace Rv
         QSize m_texSize;
         bool m_pipelineBuilt = false;
         bool m_vbufUploaded = false;
+        bool m_gpuInterop = false;
+        bool m_sharedDirty = false; // GL wrote the shared surface this frame
+        std::unique_ptr<class IOSurfaceSharedImage> m_shared;
     };
 
     // QWidget wrapper: embeds MetalPresentWindow via createWindowContainer.
@@ -127,14 +137,13 @@ namespace Rv
         // EDR wants the RGBA16F path: an 8-bit grab cannot carry values > 1.0.
         bool needsFloatTransfer() const override;
 
-        // No GPU interop yet. The IOSurface path described in
-        // _hdr_test/HDR-MACOS-EDR.md is the intended replacement for the
-        // Linux fd-based GL<->Vk sharing; until then GLView falls back to the
-        // CPU readback path, which these return false/no-op to select.
-        bool usingGpuInterop() const override { return false; }
-        bool ensureGpuInterop(QOpenGLContext*, const QSize&, bool) override { return false; }
-        bool blitFromGlFramebuffer(unsigned int, int, int) override { return false; }
-        void presentGpuInteropFrame() override {}
+        // Zero-copy GL -> Metal via IOSurface. Falls back to GLView's CPU
+        // readback if the share cannot be set up.
+        bool usingGpuInterop() const override;
+        bool ensureGpuInterop(QOpenGLContext* glctx, const QSize& pixelSize,
+                              bool float16) override;
+        bool blitFromGlFramebuffer(unsigned int srcFbo, int width, int height) override;
+        void presentGpuInteropFrame() override;
 
         MetalPresentWindow* presentWindow() const { return m_window; }
 

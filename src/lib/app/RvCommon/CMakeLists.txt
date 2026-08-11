@@ -86,7 +86,7 @@ ELSE()
 ENDIF()
 
 IF(RV_TARGET_DARWIN)
-  LIST(APPEND _sources DisplayLink.cpp MetalPresentWidget.mm)
+  LIST(APPEND _sources DisplayLink.cpp MetalPresentWidget.mm IOSurfaceSharedImage.mm)
 ENDIF()
 
 IF(RV_TARGET_DARWIN)
@@ -167,7 +167,13 @@ FILE(
   RvCommon/*.h
 )
 IF(NOT RV_TARGET_DARWIN)
-  LIST(REMOVE_ITEM _files_to_moc "RvCommon/DisplayLink.h" "RvCommon/CGDesktopVideoDevice.h")
+  # MetalPresentWidget.h declares Q_OBJECT classes whose implementation is
+  # macOS-only, so moc'ing it elsewhere would emit metaobject code referencing
+  # symbols that are never compiled. IOSurfaceSharedImage.h has no Q_OBJECT but
+  # is likewise macOS-only.
+  LIST(REMOVE_ITEM _files_to_moc "RvCommon/DisplayLink.h" "RvCommon/CGDesktopVideoDevice.h"
+       "RvCommon/MetalPresentWidget.h" "RvCommon/IOSurfaceSharedImage.h"
+  )
 ENDIF()
 
 FOREACH(
@@ -483,7 +489,9 @@ IF(RV_TARGET_DARWIN)
   TARGET_LINK_LIBRARIES(
     ${_target}
     PUBLIC TwkGLFCoreGraphics
-    PRIVATE "-framework CoreVideo"
+    # IOSurface: zero-copy GL<->Metal sharing for the EDR present path
+    # (IOSurfaceSharedImage.mm). Metal and OpenGL are already pulled in via Qt.
+    PRIVATE "-framework CoreVideo" "-framework IOSurface"
   )
 ENDIF()
 
