@@ -138,6 +138,7 @@ Measured on M4 Pro / built-in Liquid Retina XDR / Qt 6.11.1 / Xcode 26.6:
 | EDR headroom (`NSScreen.maximumExtendedDynamicRangeColorComponentValue`) | **2.95** |
 | EDR potential (`maximumPotential…`) | **16** |
 | Steps above 1.0 visibly brighter on the panel | **confirmed by eye** |
+| Fullscreen (`F`) | **works** — stacking survives the transition |
 
 **Conclusion: phase 3 proceeds as designed.** The fallback (present window as
 the *only* video surface) is not needed.
@@ -147,7 +148,11 @@ Note the spike queries `NSScreen` directly and deliberately ignores
 `sdrWhiteLevel = 200`, so consuming it would mislead. See `edrinfo.h`.
 
 Still open from the original spike list: dragging between displays with
-different headroom (open question #3 below).
+different headroom (open question #3 below) — **untested, only one display
+available on the test machine**. Note the spike also measured headroom of
+**2.95 current vs 16 potential** on the same panel, so headroom varies over
+time regardless of which display the window is on. Question #3 is therefore
+not purely a multi-monitor problem.
 
 Then follow `HDR-SURFACE-DESIGN.md` §10 phasing.
 
