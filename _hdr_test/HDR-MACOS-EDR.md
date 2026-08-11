@@ -14,6 +14,108 @@ Wayland branch as the reference implementation.
 
 ---
 
+## Implementation status — BUILT AND WORKING
+
+The assessment below was written before any code existed. It has since been
+implemented and **HDR presentation on macOS works**, confirmed by eye on a
+built-in Liquid Retina XDR (M4 Pro, Qt 6.11.1, Xcode 26.6, OCIO 2.5.2).
+
+### What exists now
+
+| Piece | Where |
+|---|---|
+| `PresentSurface` — backend-neutral present interface | `RvCommon/PresentSurface.h` |
+| Metal/QRhi EDR present surface | `RvCommon/MetalPresentWidget.{h,mm}` |
+| Per-platform backend selection | `RvDocument.cpp` |
+| Display P3 Extended encoding (default on macOS) | `DisplayIPNode.cpp`, `GLView.cpp` |
+| Embedding spike that de-risked it | `_hdr_test/spike_b/` |
+
+Run it:
+
+```bash
+OCIO="ocio://studio-config-v4.0.0_aces-v2.0_ocio-v2.5" RV_HDR=1 \
+  _build/stage/app/RV.app/Contents/MacOS/RV your.exr
+```
+
+### Predictions that held
+
+- **Present shaders run on Metal unchanged.** The `.qsb` blobs already carry an
+  MSL 12 variant next to SPIR-V/GLSL/HLSL. Zero shader work was needed.
+- **`HDRExtendedDisplayP3Linear` is supported** — `isFormatSupported()` returns
+  true on Qt 6.11, no SDR fallback.
+- **The 203-nit SDR-white mess disappears.** The Wayland backend's
+  `sdrWhite/refWhite` boost is simply not applied: on an extended-linear macOS
+  surface linear 1.0 *is* SDR white.
+- **Mode 3 (`p3extended`) was the right target.** It was written on the Linux
+  side as a "macOS EDR-style" analogue and turned out to be exactly correct.
+
+### What the assessment got wrong or missed
+
+**1. PQ end-to-end was the real blocker, not GPU interop.**
+`RV_HDR` encoded the display as SMPTE-2084 on every platform, so the macOS
+path encoded to PQ and then immediately undid it in the present shader — a
+round trip through a transfer function no surface ever carried. Visible as a
+plausible-looking but wrong image (spotted by eye as "PQ-encoded buffer tagged
+Display P3 extended"). Fixed by adding `RV_HDR_ENCODING` and defaulting macOS
+to `p3extended`.
+
+**Three stages must agree**, and nothing enforces it:
+
+| Stage | Sets | macOS default |
+|---|---|---|
+| `DisplayIPNode` | buffer encoding | sRGB piecewise TF |
+| `GLView` | GL surface tag | `QColorSpace::DisplayP3` |
+| `MetalPresentWidget` | decode mode | 3 |
+
+A mismatch decodes with the wrong transfer and still *looks* like an image.
+This is the single easiest thing to get wrong in the whole path, and it argues
+for the canonical-space registry in `HDR-SURFACE-DESIGN.md` carrying the
+encoding rather than three files agreeing by convention.
+
+**2. EDR headroom is dynamic, and swings hard.**
+Measured on one panel across three launches: **1.2, 2.95, 8.56**. macOS
+throttles for brightness, thermals and other on-screen EDR content. This
+reframes open question #3 (pin the surface tag or follow it) — it is not a
+multi-monitor edge case, it happens sitting still on a single display. Any
+"which steps are visible" reasoning must treat headroom as a live value.
+
+**3. `QRhiSwapChain::hdrInfo()` really is useless on Metal.**
+Confirmed in practice, not just by reading qtbase: the hardcoded
+`sdrWhiteLevel = 200` is what you get. All headroom here comes from
+`NSScreen.maximumExtendedDynamicRangeColorComponentValue`.
+
+**4. OCIO ships the ACES 2.0 studio config built in.**
+No file needed — OCIO 2.5.2 resolves
+`ocio://studio-config-v4.0.0_aces-v2.0_ocio-v2.5` through `CreateFromEnv()`,
+and it is the same config as the `alexfry/imagescope` copy. Its
+`Display P3 - Display` display with the **`Un-tone-mapped`** view is the pairing
+the mode-3 shader was validated against (`code 1.825 → linear 4.0`).
+
+**5. Frame orientation must persist with the texture.**
+A per-frame `flipV` local is a trap: repaints that carry no new frame
+(`UpdateRequest`, resize) re-upload the uniform while the texture still holds
+the previous frame, so the image flips intermittently. The half-float GL
+readback is bottom-up (`flipV=1`); `grabFramebuffer()` is already top-left
+(`flipV=0`). Store it as state alongside the texture.
+
+**6. `exposeEvent` arrives late.** The embedded QWindow is not exposed until
+well after `RvDocument` construction — after plugin loading. Diagnostics that
+sample too early will wrongly conclude the swapchain never came up.
+
+### Still not done
+
+- **GPU interop.** `ensureGpuInterop()` returns false, so GLView uses its CPU
+  readback path. The IOSurface design below is unimplemented. This is the
+  remaining performance work, and the assessment's effort estimate for it is
+  still untested.
+- **Surface tag driven by the OCIO display.** Currently the encoding is chosen
+  by platform default, not derived from the OCIO display colorspace as
+  `HDR-SURFACE-DESIGN.md` requires.
+- **Headroom is measured but unused.** Nothing adapts to it and nothing warns
+  when content exceeds it.
+
+---
+
 ## Verdict
 
 **Feasible, and easier than the Wayland bring-up.** The architecture on the

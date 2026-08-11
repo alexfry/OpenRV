@@ -1,9 +1,16 @@
 # START HERE — HDR / EDR present-surface work
 
-Handoff note for a session picking this branch up cold. The docs added here
-are **design only** — no new code yet — but they now sit *on top of* the
-working Wayland implementation rather than beside it. Read this file first,
+Handoff note for a session picking this branch up cold. Read this file first,
 then work in the order below.
+
+> **HDR on macOS works now.** What began as design-only has been implemented:
+> the tree builds on macOS, and RV presents HDR through a Metal/EDR surface on
+> an XDR panel. See §0 for how to run it and §2a for what that changed.
+
+```bash
+OCIO="ocio://studio-config-v4.0.0_aces-v2.0_ocio-v2.5" RV_HDR=1 \
+  _build/stage/app/RV.app/Contents/MacOS/RV your.exr
+```
 
 ---
 
@@ -35,6 +42,47 @@ demoted to "put a float buffer on screen". The **OCIO display colorspace
 determines the surface tag** — it is derived, not separately chosen. Spaces
 neither platform names (Rec.709 D65 γ2.4) resolve via named/parametric
 primitives where possible and synthesized **ICC** where not.
+
+---
+
+## 2a. What is implemented (macOS)
+
+Built and confirmed by eye on M4 Pro / built-in Liquid Retina XDR / Qt 6.11.1 /
+Xcode 26.6 / OCIO 2.5.2.
+
+| Piece | File |
+|---|---|
+| `PresentSurface` — backend-neutral present interface | `RvCommon/PresentSurface.h` |
+| Metal/QRhi EDR present surface | `RvCommon/MetalPresentWidget.{h,mm}` |
+| Per-platform backend selection | `RvDocument.cpp` |
+| Display P3 Extended encoding (macOS default) | `DisplayIPNode.cpp`, `GLView.cpp` |
+| Embedding spike | `spike_b/` |
+
+Environment:
+
+| Variable | Meaning |
+|---|---|
+| `RV_HDR=1` | enable the HDR display path (also opts macOS into the Metal surface) |
+| `RV_HDR_ENCODING=pq\|p3extended` | buffer encoding. Default `p3extended` on macOS, `pq` elsewhere |
+| `RV_METAL_PRESENT` | force the Metal surface on/off independently of `RV_HDR` |
+| `RV_MACOS_PRESENT_MODE` | override the present-shader decode mode |
+| `RV_METAL_PRESENT_DEBUG=1` | log widget/container/window visibility and sizes |
+
+**Three stages must agree on the encoding**, and nothing enforces it:
+`DisplayIPNode` (what goes in the buffer) → `GLView` (how the GL surface is
+tagged) → `MetalPresentWidget` (which decode mode). A mismatch produces a
+plausible-looking but wrong image. This is the strongest argument for the
+canonical registry in `HDR-SURFACE-DESIGN.md` owning the encoding.
+
+**Linux is unaffected** by all of it: `RV_HDR_ENCODING` defaults to `pq` off
+Darwin, the Vulkan sources are unchanged, and `VulkanPresentWidget.cpp` /
+`GlVkSharedImage.cpp` were never edited. **But none of it has been compiled on
+Linux** — the `PresentSurface` refactor touches `GLView.cpp`, so rebuild on the
+Arch box before trusting it there.
+
+Not done: GPU interop (CPU readback for now — the IOSurface path is still
+unimplemented), deriving the surface tag from the OCIO display, and doing
+anything with measured headroom.
 
 ---
 
@@ -160,11 +208,51 @@ Then follow `HDR-SURFACE-DESIGN.md` §10 phasing.
 
 ## 4. Where work can happen
 
-**macOS builds now work.** The tree configures and builds on macOS (Qt 6.11.1
-via `aqt`, CMake 3.31.7, `RV_ALIGN_PYSIDE=ON`); `RV -version` runs and the
-present overlay is correctly inert on Cocoa. Getting there needed three fixes,
-all on this branch: the Vulkan present path confined to Linux, a libclang
-fallback for modern Xcode, and OIIO's Nuke plugins disabled.
+**macOS builds now work.** Recipe that got there, on macOS 26 / Xcode 26.6 /
+M4 Pro:
+
+```bash
+# Qt 6.11.1 — aqt, not the GUI installer (no Qt account needed).
+pip install aqtinstall
+aqt install-qt mac desktop 6.11.1 clang_64 -O "$HOME/Qt" -m all
+
+# CMake 3.31.x — CMake 4 hard-errors on the deps' old cmake_minimum_required.
+# Install it privately; do NOT run the docs' --install=/usr/local/bin step,
+# which shadows your system cmake for every other project.
+curl -fsSLO https://github.com/Kitware/CMake/releases/download/v3.31.7/cmake-3.31.7-macos-universal.tar.gz
+# extract to ~/opt/cmake-3.31.7 and call it by absolute path
+
+brew install ninja readline sqlite3 xz zlib tcl-tk@8 autoconf automake libtool \
+             python@3.11 yasm clang-format black meson nasm pkg-config glew rust ccache
+brew unlink qt@5     # else system_qt.cmake's bare-qmake fallback finds 5.15
+
+python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+source .venv/bin/activate                      # rvbootstrap does this for you
+
+cmake -B _build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DRV_DEPS_BASE_DIR="$HOME/openrv-deps" -DRV_VFX_PLATFORM=CY2025 \
+  -DRV_DEPS_QT_LOCATION="$HOME/Qt/6.11.1/macos" -DRV_ALIGN_PYSIDE=ON
+cmake --build _build --target main_executable --parallel $(sysctl -n hw.ncpu)
+```
+
+Gotchas that cost real time:
+
+- **macOS blocks writes into `.app` bundles.** The build stages into
+  `_build/stage/app/RV.app`, so the app running the build (Terminal, or your
+  editor/agent) needs **App Management** in System Settings → Privacy &
+  Security. Without it the build dies partway with an opaque ninja failure.
+- **`apply_qt_fix.sh` is a no-op on 6.11** — the AGL fix (QTBUG-137687) is
+  already upstream there, verified against the installed files. It only patches
+  6.5.3 / 6.8.3 anyway.
+- `qt_fix`, libclang and Nuke issues are fixed on this branch (see below), but
+  a **network drop mid-download** of the 1 GB libclang archive is not: there is
+  no resume in `download_file()`. Re-fetch with `curl -C -` into
+  `$RV_DEPS_BASE_DIR/RV_DEPS_PYTHON3/build/libclang.7z` and rerun.
+
+Three fixes on this branch were needed to get here: the Vulkan present path
+confined to Linux, a libclang fallback for modern Xcode, and OIIO's Nuke
+plugins disabled (any developer with Nuke installed hits that one, on any
+platform).
 
 | Work | Machine | Why |
 |---|---|---|
@@ -194,9 +282,14 @@ Beyond the spikes:
    allow per-space override.
 2. **Where the residual transform lives** — present shader (proposed) vs
    appended to the OCIO GPU pass.
-3. **Multi-display**: surface tag is per-device, but a window dragged between
-   displays keeps its tag while the *preferred* description changes. Pin and
-   warn, or follow? Design suggests pin + HUD warning.
+3. **Headroom changes under you** — and this is now measured, not theoretical.
+   The same XDR panel reported **1.2, 2.95 and 8.56** across three launches, as
+   macOS throttles for brightness, thermals and other on-screen EDR content. So
+   this is not just the multi-display case (surface tag pinned while the
+   preferred description changes); it happens sitting still on one display.
+   Pin and warn, or follow? Design suggests pin + HUD warning. Nothing
+   currently reacts to headroom at all, though `MetalPresentWindow` measures
+   it.
 4. **`SurfaceCapabilities` shape** — worth designing carefully, since it is
    what an eventual OCIO negotiation API would consume. Taking a real
    two-platform implementation to OCIO #1996 is the strongest contribution
@@ -207,11 +300,15 @@ Beyond the spikes:
 ## 6. Branch state
 
 Branch: `claude/macos-edr-display-assessment-hxid10`, branched from
-`alexfry/arch-qt611-wayland-build` (originally cut from `main` and rebased
-onto the Wayland branch, so the working Vulkan/Wayland HDR present path is in
-this tree). The six commits this branch adds on top are **documentation
-only — no code changes**; everything below `48858444 docs: complete HDR
-Wayland / GPU interop field notes` is the Wayland implementation.
+`alexfry/arch-qt611-wayland-build` (originally cut from `main` and rebased onto
+the Wayland branch, so the working Vulkan/Wayland HDR present path is in this
+tree). Everything below `48858444 docs: complete HDR Wayland / GPU interop
+field notes` is the Wayland implementation.
+
+On top of that this branch adds, in order: the design docs; three build fixes
+(Vulkan path confined to Linux, libclang fallback, OIIO Nuke disable); Spike B;
+the `PresentSurface` refactor; the Metal/EDR present surface; and the Display
+P3 Extended default.
 
 `_hdr_test/` therefore holds both the design docs and the pre-existing Wayland
 notes, README, and test wedge material (`hdr_wedge_1080.exr`,
