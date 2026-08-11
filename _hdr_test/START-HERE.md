@@ -68,7 +68,7 @@ cited source first.
 | Assumption | Risk | How to settle |
 |---|---|---|
 | **An app-set Wayland image description survives alongside a Mesa-WSI-managed Vulkan swapchain** | **High — drives the Linux architecture** | Spike A below. Sourced only from Vulkan-Docs issue #2307, which says "presumably `PASS_THROUGH` is the value that guarantees no `wp_color_management_surface_v1` is created". Not tested |
-| `createWindowContainer` overlay over a live `QOpenGLWidget` behaves on macOS (stacking, fullscreen, spaces) | Medium | Spike B below |
+| ~~`createWindowContainer` overlay over a live `QOpenGLWidget` behaves on macOS~~ | — | **Settled — Spike B passed.** See below |
 | `QNativeInterface::QWaylandWindow::surface()` availability in the pinned Qt | Low | Check the Qt version in use |
 | IOSurface RGBA16F ↔ GL binding works on all target GPUs | Low | Every browser does this; CPU fallback exists regardless |
 | Compositors advertise `set_tf_power` (needed for γ2.6) | Medium | Query the `feature` enum at bind; named `bt1886` covers γ2.4 without it |
@@ -93,10 +93,11 @@ cited source first.
 
 ---
 
-## 3. Immediate next action: the phase-0 spikes
+## 3. The phase-0 spikes
 
-Both are go/no-go on architecture and should happen before any library code.
-Neither can run in a cloud container — see §4.
+Both are go/no-go on architecture. **Spike B is done and passed**; Spike A is
+still outstanding and needs the Arch box. Neither can run in a cloud container
+— see §4.
 
 ### Spike A — Linux tagging authority (½–1 day, Arch/Hyprland box)
 
@@ -118,28 +119,47 @@ swapchain, or must we take over swapchain creation to get `PASS_THROUGH`?
 → pick between owning the `VkSwapchainKHR` (preferred) or patching
 `qrhivulkan.cpp` (§6 of the design doc).
 
-### Spike B — macOS embedding (1–2 days, Mac)
+### Spike B — macOS embedding — **DONE, PASSED**
 
-**Question:** does the present-window overlay pattern work on macOS?
+Implemented in `spike_b/`. Standalone (no OpenRV deps), builds in seconds:
 
-1. Toy Qt app: `QWindow` with `setSurfaceType(MetalSurface)`, `QRhi::Metal`,
-   swapchain format `HDRExtendedDisplayP3Linear`, render a gradient running
-   past 1.0.
-2. Embed it via `createWindowContainer` over a live `QOpenGLWidget` in a
-   `QStackedLayout(StackAll)` — the exact arrangement `RvDocument` uses.
-3. Test: stacking, resize, fullscreen, dragging between displays.
-4. Confirm EDR is actually engaged (Xcode → Debug → EDR usage) and that
-   values >1.0 are visibly brighter on an XDR panel.
+```bash
+cmake -B build -G Ninja -DCMAKE_PREFIX_PATH="$HOME/Qt/6.11.1/macos"
+cmake --build build && ./build/spike_b
+```
 
-**Outcome decides:** works → phase 3 proceeds as designed. Doesn't → fall back
-to the present window as the *only* video surface, which the existing
-FBO-redirection plumbing already supports.
+Measured on M4 Pro / built-in Liquid Retina XDR / Qt 6.11.1 / Xcode 26.6:
+
+| Check | Result |
+|---|---|
+| `QRhi::create(QRhi::Metal)` | OK |
+| `HDRExtendedDisplayP3Linear` `isFormatSupported()` | **true** — no SDR fallback |
+| `createWindowContainer` over live `QOpenGLWidget` in `QStackedLayout(StackAll)` | **works** — container sized, Metal window exposed, correctly stacked |
+| EDR headroom (`NSScreen.maximumExtendedDynamicRangeColorComponentValue`) | **2.95** |
+| EDR potential (`maximumPotential…`) | **16** |
+| Steps above 1.0 visibly brighter on the panel | **confirmed by eye** |
+
+**Conclusion: phase 3 proceeds as designed.** The fallback (present window as
+the *only* video surface) is not needed.
+
+Note the spike queries `NSScreen` directly and deliberately ignores
+`QRhiSwapChain::hdrInfo()` — on Metal Qt returns a hardcoded dummy
+`sdrWhiteLevel = 200`, so consuming it would mislead. See `edrinfo.h`.
+
+Still open from the original spike list: dragging between displays with
+different headroom (open question #3 below).
 
 Then follow `HDR-SURFACE-DESIGN.md` §10 phasing.
 
 ---
 
 ## 4. Where work can happen
+
+**macOS builds now work.** The tree configures and builds on macOS (Qt 6.11.1
+via `aqt`, CMake 3.31.7, `RV_ALIGN_PYSIDE=ON`); `RV -version` runs and the
+present overlay is correctly inert on Cocoa. Getting there needed three fixes,
+all on this branch: the Vulkan present path confined to Linux, a libclang
+fallback for modern Xcode, and OIIO's Nuke plugins disabled.
 
 | Work | Machine | Why |
 |---|---|---|
