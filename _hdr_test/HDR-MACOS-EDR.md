@@ -5,6 +5,13 @@ Assessment of porting the Wayland/Vulkan desktop-HDR work
 EDR display chain. Written against OpenRV `main` (Qt 6.8.3 pin) with the
 Wayland branch as the reference implementation.
 
+> **See also `HDR-SURFACE-DESIGN.md`** — the cross-platform design that
+> supersedes this document's macOS-specific framing. Its central point: both
+> platforms' color-management layers (ColorSync / `wp_color_manager_v1`) are
+> far richer than the graphics-API swapchain enums, and the shared
+> abstraction belongs there. This document remains accurate as the macOS
+> feasibility and effort analysis.
+
 ---
 
 ## Verdict
