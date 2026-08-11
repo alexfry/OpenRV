@@ -64,6 +64,12 @@ IF(NOT RV_VFX_CY2023)
 ENDIF()
 LIST(APPEND _configure_options "-DUSE_FREETYPE=0")
 LIST(APPEND _configure_options "-DUSE_GIF=OFF")
+# OIIO auto-detects any Nuke install on the host and then enables its txReader /
+# txWriter Nuke plugins, whose CMakeLists fail to configure ("set_target_properties
+# called with incorrect number of arguments"). RV never uses those plugins, so a
+# developer merely having Nuke installed should not break the build.
+LIST(APPEND _configure_options "-DENABLE_Nuke=OFF")
+LIST(APPEND _configure_options "-DUSE_NUKE=OFF")
 
 # Write an initial-cache script so CMAKE_PREFIX_PATH (a semicolon-separated list) survives ExternalProject's double expansion of CONFIGURE_COMMAND args. Uses
 # RV_DEPS_CMAKE_PREFIX_PATH (snapshot before Qt6 additions) to avoid passing ~150 Qt component dirs. On Windows, paths are normalized to forward slashes to
