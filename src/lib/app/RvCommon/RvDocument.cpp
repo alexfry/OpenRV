@@ -228,63 +228,7 @@ namespace Rv
         m_stackedLayout->setStackingMode(QStackedLayout::StackAll);
         m_stackedLayout->addWidget(m_glView);
 
-        // Embed a platform present surface over the GL view via
-        // createWindowContainer: a separate QWindow with its own graphics API
-        // and its own colour-managed swapchain, but the same top-level client
-        // (Hyprland tiles one RV window, not two).
-        //
-        //   Wayland  Vulkan/QRhi     — see VulkanPresentWidget
-        //   macOS    Metal/QRhi EDR  — see MetalPresentWidget
-        {
-            const char* hdr = getenv("RV_HDR");
-            const bool hdrOn = hdr && *hdr && strcmp(hdr, "0") && strcmp(hdr, "false")
-                               && strcmp(hdr, "off") && strcmp(hdr, "no");
-
-            const char* forceCpu = getenv("RV_WAYLAND_CPU_PRESENT");
-            const bool cpuOnly = forceCpu && strcmp(forceCpu, "0") && strcmp(forceCpu, "false")
-                                 && strcmp(forceCpu, "off");
-
-            const char* backend = nullptr;
-
-#ifdef PLATFORM_DARWIN
-            // Opt-in for now: the EDR path is new, and without RV_HDR there is
-            // nothing to gain over the plain GL path.
-            const char* forceMetal = getenv("RV_METAL_PRESENT");
-            const bool wantMetal =
-                forceMetal ? (strcmp(forceMetal, "0") && strcmp(forceMetal, "false")
-                              && strcmp(forceMetal, "off"))
-                           : hdrOn;
-            if (wantMetal && !cpuOnly)
-            {
-                m_presentSurfaceWidget = new MetalPresentWidget(m_centralWidget);
-                backend = "Metal/EDR";
-            }
-#else
-            const bool onWayland =
-                QGuiApplication::platformName().startsWith(QLatin1String("wayland"));
-            const char* forceVk = getenv("RV_VULKAN_PRESENT");
-            const bool wantVk =
-                forceVk ? (strcmp(forceVk, "0") && strcmp(forceVk, "false") && strcmp(forceVk, "off"))
-                        : onWayland;
-            if (wantVk && !cpuOnly)
-            {
-                m_presentSurfaceWidget = new VulkanPresentWidget(m_centralWidget);
-                backend = "Vulkan";
-            }
-#endif
-
-            if (m_presentSurfaceWidget)
-            {
-                if (auto* ps = dynamic_cast<PresentSurface*>(m_presentSurfaceWidget))
-                    ps->setHdrPresent(hdrOn);
-                // Stack on top of GLView (StackAll: later widgets paint above).
-                m_stackedLayout->addWidget(m_presentSurfaceWidget);
-                m_glView->setExternalPresentWidget(m_presentSurfaceWidget);
-                cout << "INFO: Embedded " << backend
-                     << " present (createWindowContainer subsurface). HDR="
-                     << (hdrOn ? "on" : "off") << endl;
-            }
-        }
+        createPresentSurface();
 
         setCentralWidget(m_viewContainerWidget);
 
@@ -841,6 +785,97 @@ namespace Rv
         }
     }
 
+    bool RvDocument::wantHdrPresent()
+    {
+        const char* hdr = getenv("RV_HDR");
+        return hdr && *hdr && strcmp(hdr, "0") && strcmp(hdr, "false") && strcmp(hdr, "off")
+               && strcmp(hdr, "no");
+    }
+
+    void RvDocument::createPresentSurface()
+    {
+        // Embed a platform present surface over the GL view via
+        // createWindowContainer: a separate QWindow with its own graphics API
+        // and its own colour-managed swapchain, but the same top-level client
+        // (Hyprland tiles one RV window, not two).
+        //
+        //   Wayland  Vulkan/QRhi     — see VulkanPresentWidget
+        //   macOS    Metal/QRhi EDR  — see MetalPresentWidget
+        //
+        // Called from the constructor and again from rebuildGLView(), because a
+        // rebuilt GLView knows nothing about the previous overlay.
+        if (m_presentSurfaceWidget)
+            return;
+
+        const bool hdrOn = wantHdrPresent();
+
+        const char* forceCpu = getenv("RV_WAYLAND_CPU_PRESENT");
+        const bool cpuOnly = forceCpu && strcmp(forceCpu, "0") && strcmp(forceCpu, "false")
+                             && strcmp(forceCpu, "off");
+
+        const char* backend = nullptr;
+
+#ifdef PLATFORM_DARWIN
+        // Opt-in for now: the EDR path is new, and without RV_HDR there is
+        // nothing to gain over the plain GL path.
+        const char* forceMetal = getenv("RV_METAL_PRESENT");
+        const bool wantMetal = forceMetal ? (strcmp(forceMetal, "0") && strcmp(forceMetal, "false")
+                                             && strcmp(forceMetal, "off"))
+                                          : hdrOn;
+        if (wantMetal && !cpuOnly)
+        {
+            m_presentSurfaceWidget = new MetalPresentWidget(m_centralWidget);
+            backend = "Metal/EDR";
+        }
+#else
+        const bool onWayland =
+            QGuiApplication::platformName().startsWith(QLatin1String("wayland"));
+        const char* forceVk = getenv("RV_VULKAN_PRESENT");
+        const bool wantVk =
+            forceVk ? (strcmp(forceVk, "0") && strcmp(forceVk, "false") && strcmp(forceVk, "off"))
+                    : onWayland;
+        if (wantVk && !cpuOnly)
+        {
+            m_presentSurfaceWidget = new VulkanPresentWidget(m_centralWidget);
+            backend = "Vulkan";
+        }
+#endif
+
+        if (!m_presentSurfaceWidget)
+            return;
+
+        if (auto* ps = dynamic_cast<PresentSurface*>(m_presentSurfaceWidget))
+            ps->setHdrPresent(hdrOn);
+        // Stack on top of GLView (StackAll: later widgets paint above).
+        m_stackedLayout->addWidget(m_presentSurfaceWidget);
+        m_glView->setExternalPresentWidget(m_presentSurfaceWidget);
+        cout << "INFO: Embedded " << backend
+             << " present (createWindowContainer subsurface). HDR=" << (hdrOn ? "on" : "off")
+             << endl;
+    }
+
+    void RvDocument::destroyPresentSurface()
+    {
+        if (!m_presentSurfaceWidget)
+            return;
+        m_stackedLayout->removeWidget(m_presentSurfaceWidget);
+        m_presentSurfaceWidget->deleteLater();
+        m_presentSurfaceWidget = nullptr;
+    }
+
+    void RvDocument::reattachPresentSurface()
+    {
+        // A rebuilt GLView starts with no overlay. Re-point it at the existing
+        // surface and restore the stacking order, since the new GLView was
+        // added to the layout after the overlay.
+        if (!m_presentSurfaceWidget || !m_glView)
+            return;
+        m_glView->setExternalPresentWidget(m_presentSurfaceWidget);
+        m_stackedLayout->removeWidget(m_presentSurfaceWidget);
+        m_stackedLayout->addWidget(m_presentSurfaceWidget);
+        m_presentSurfaceWidget->raise();
+    }
+
     void RvDocument::rebuildGLView(bool stereo, bool vsync, bool doubleBuffer, int red, int green, int blue, int alpha)
     {
         //
@@ -887,6 +922,10 @@ namespace Rv
         m_glView = newGLView;
         m_glView->show();
         m_glView->setFocus(Qt::OtherFocusReason);
+
+        // The new GLView has no present overlay; without this the surface stays
+        // on screen but is never fed another frame.
+        reattachPresentSurface();
 
         m_topViewToolBar->setDevice(m_glView->videoDevice());
 

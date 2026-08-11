@@ -171,6 +171,11 @@ namespace Rv
         // Metal/EDR on macOS. Held as the widget so the stacked layout and
         // GLView can take it; the backend is reached through PresentSurface.
         QWidget* m_presentSurfaceWidget = nullptr;
+
+        static bool wantHdrPresent();
+        void createPresentSurface();
+        void destroyPresentSurface();
+        void reattachPresentSurface();
         GLView* m_oldGLView;
         QWidget* m_viewContainerWidget;
         RvTopViewToolBar* m_topViewToolBar;
