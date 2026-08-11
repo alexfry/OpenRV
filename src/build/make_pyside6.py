@@ -97,14 +97,23 @@ def prepare() -> None:
             return f"{version_str}-based-macos-universal.7z"
 
         def get_fallback_clang_filename_suffix(version):
-            major_minor_version_str = ".".join(version[:2])
-            if major_minor_version_str == "14.0":
-                return "14.0.3-based-macos-universal.7z"
-            elif major_minor_version_str == "15.0":
-                return "15.0.0-based-macos-universal.7z"
-            elif major_minor_version_str == "17.0":
-                return "17.0.1-based-macos-universal.7z"
-            return None
+            # The requested version above comes from the *local* Xcode clang,
+            # but Qt only publishes prebuilt libclang for the versions it built
+            # against, and Xcode's clang runs ahead of them. Xcode 26 reports
+            # 21.0.0, for which Qt ships nothing — the 21.x line is 21.1.x.
+            # Map each major.minor to the newest patch Qt actually publishes.
+            fallbacks = {
+                "14.0": "14.0.3-based-macos-universal.7z",
+                "15.0": "15.0.0-based-macos-universal.7z",
+                "17.0": "17.0.1-based-macos-universal.7z",
+                "18.1": "18.1.7-based-macos-universal.7z",
+                "19.1": "19.1.6-based-macos-universal.7z",
+                "20.1": "20.1.3-based-macos-universal.7z",
+                "21.0": "21.1.2-based-macos-universal.7z",
+                "21.1": "21.1.2-based-macos-universal.7z",
+                "22.1": "22.1.8-based-macos-universal.7z",
+            }
+            return fallbacks.get(".".join(version[:2]))
 
         clang_version = get_clang_version()
         if clang_version:
@@ -133,7 +142,17 @@ def prepare() -> None:
             print(f"WARNING: Attempting to fallback on known version: {fallback_download_url}...")
             download_ok = download_file(fallback_download_url, libclang_zip)
         if not download_ok:
-            print(f"ERROR: Could not download or version does not exist: {download_url}")
+            # Bail out here rather than falling through to the extract below:
+            # a failed download leaves the server's HTML error page sitting at
+            # libclang.7z, and unpacking it raises "not a 7z file", which hides
+            # the real cause.
+            raise RuntimeError(
+                f"Could not download libclang: {download_url}\n"
+                "No prebuilt libclang matches this toolchain. Add the correct "
+                "version to get_fallback_clang_filename_suffix() in this file; "
+                "available builds are listed at "
+                "https://mirrors.ocf.berkeley.edu/qt/development_releases/prebuilt/libclang/"
+            )
 
     # clean up previous failed extraction
     libclang_tmp = os.path.join(TEMP_DIR, "libclang-tmp")
