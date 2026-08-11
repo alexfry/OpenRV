@@ -8,6 +8,7 @@
 #ifndef __rv_qt__GLView__h__
 #define __rv_qt__GLView__h__
 #include <TwkGLF/GL.h>
+#include <RvCommon/PresentSurface.h>
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
 #include <QSurfaceFormat>
@@ -82,6 +83,8 @@ namespace Rv
         GLuint presentFramebufferObject() const;
         // p3extended (and similar) need float render + transfer for EDR >1.
         bool needsFloatPresentTransfer() const;
+        // The present overlay as a backend-neutral surface, or null.
+        PresentSurface* presentSurface() const;
 
     public slots:
         void eventProcessingTimeout();

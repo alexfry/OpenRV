@@ -8,6 +8,8 @@
 #ifndef __rv_qt__VulkanPresentWidget__h__
 #define __rv_qt__VulkanPresentWidget__h__
 
+#include <RvCommon/PresentSurface.h>
+
 #include <QWidget>
 #include <QImage>
 #include <QWindow>
@@ -121,26 +123,35 @@ namespace Rv
     };
 
     // QWidget wrapper: embeds VulkanPresentWindow via createWindowContainer.
-    class VulkanPresentWidget : public QWidget
+    //
+    // The PresentSurface virtuals below match the signatures this class already
+    // declared, so VulkanPresentWidget.cpp needs no changes to satisfy them.
+    class VulkanPresentWidget
+        : public QWidget
+        , public PresentSurface
     {
         Q_OBJECT
     public:
         explicit VulkanPresentWidget(QWidget* parent = nullptr);
         ~VulkanPresentWidget() override;
 
-        void setFrame(QImage img);
-        void setFrameHalf(int width, int height, std::vector<uint16_t> rgba16);
-        void setHdrPresent(bool enabled);
-        bool hdrPresent() const;
+        void setFrame(QImage img) override;
+        void setFrameHalf(int width, int height, std::vector<uint16_t> rgba16) override;
+        void setHdrPresent(bool enabled) override;
+        bool hdrPresent() const override;
         VulkanPresentWindow* presentWindow() const { return m_window; }
         static bool presentModeNeedsFloatTransfer()
         {
             return VulkanPresentWindow::presentModeNeedsFloatTransfer();
         }
-        bool usingGpuInterop() const;
-        bool ensureGpuInterop(QOpenGLContext* glctx, const QSize& pixelSize, bool float16);
-        bool blitFromGlFramebuffer(unsigned int srcFbo, int width, int height);
-        void presentGpuInteropFrame();
+        // Interface form of the static above; keeps the existing call sites and
+        // the .cpp untouched.
+        bool needsFloatTransfer() const override { return presentModeNeedsFloatTransfer(); }
+        bool usingGpuInterop() const override;
+        bool ensureGpuInterop(QOpenGLContext* glctx, const QSize& pixelSize,
+                              bool float16) override;
+        bool blitFromGlFramebuffer(unsigned int srcFbo, int width, int height) override;
+        void presentGpuInteropFrame() override;
 
     private:
         VulkanPresentWindow* m_window = nullptr;

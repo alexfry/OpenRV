@@ -333,11 +333,10 @@ namespace Rv
         }
         // Backup: if the native present surface still gets events, forward them.
         m_presentOverlay->installEventFilter(this);
-        if (auto* vk = qobject_cast<VulkanPresentWidget*>(present))
+        if (auto* ps = dynamic_cast<PresentSurface*>(present))
         {
-            vk->setHdrPresent(wantHdrDisplay());
-            cout << "INFO: Wayland Vulkan present attached (QRhi/Vulkan; GL FBO → texture). "
-                    "HDR request="
+            ps->setHdrPresent(wantHdrDisplay());
+            cout << "INFO: external present surface attached (GL FBO → texture). HDR request="
                  << (wantHdrDisplay() ? "yes" : "no") << endl;
         }
         syncPresentOverlayGeometry();
@@ -618,10 +617,18 @@ namespace Rv
             m_presentOverlay->show();
     }
 
+    PresentSurface* GLView::presentSurface() const
+    {
+        // PresentSurface is not a QObject, so this is dynamic_cast rather than
+        // qobject_cast. Returns null when there is no overlay, or when the
+        // overlay is some other widget.
+        return dynamic_cast<PresentSurface*>(m_presentOverlay);
+    }
+
     bool GLView::needsFloatPresentTransfer() const
     {
-        return VulkanPresentWidget::presentModeNeedsFloatTransfer()
-               && qobject_cast<VulkanPresentWidget*>(m_presentOverlay) != nullptr;
+        PresentSurface* ps = presentSurface();
+        return ps && ps->needsFloatTransfer();
     }
 
     GLuint GLView::presentFramebufferObject() const
@@ -682,9 +689,13 @@ namespace Rv
         if (!m_presentOverlay->isVisible())
             m_presentOverlay->show();
 
-        auto* vk = qobject_cast<VulkanPresentWidget*>(m_presentOverlay);
+        // Backend-neutral: Vulkan on Linux, Metal on macOS. Null if the overlay
+        // is not a present surface at all.
+        auto* vk = presentSurface();
 
-        // Prefer GPU interop: blit FBO → shared GL/Vk image (no readback).
+        // Prefer GPU interop: blit FBO → shared image (no readback). Backends
+        // without interop return false from ensureGpuInterop and fall through
+        // to the CPU transfer below.
         if (vk && QOpenGLContext::currentContext())
         {
             const bool wantFloat = needsFloatPresentTransfer();
@@ -753,9 +764,12 @@ namespace Rv
             }
             else
             {
-                QTimer::singleShot(0, vk, [vk, w, h, data = std::move(pixels)]() mutable {
-                    vk->setFrameHalf(w, h, std::move(data));
-                });
+                // Context object must be a QObject; PresentSurface is not one,
+                // so use the overlay widget for lifetime tracking.
+                QTimer::singleShot(0, m_presentOverlay,
+                                   [vk, w, h, data = std::move(pixels)]() mutable {
+                                       vk->setFrameHalf(w, h, std::move(data));
+                                   });
                 s_inPresent = false;
                 return;
             }
@@ -771,7 +785,9 @@ namespace Rv
 
         if (vk)
         {
-            QTimer::singleShot(0, vk, [vk, img = std::move(img)]() mutable { vk->setFrame(std::move(img)); });
+            QTimer::singleShot(0, m_presentOverlay, [vk, img = std::move(img)]() mutable {
+                vk->setFrame(std::move(img));
+            });
         }
         else if (auto* overlay = dynamic_cast<PresentOverlay*>(m_presentOverlay))
         {
