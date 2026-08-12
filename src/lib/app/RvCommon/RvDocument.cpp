@@ -25,6 +25,7 @@
 #endif
 #include <RvCommon/GLView.h> // WINDOWS: include AFTER other stuff
 #include <RvCommon/PresentSurface.h>
+#include <IPCore/DisplayHDRMode.h>
 #ifdef PLATFORM_DARWIN
 #include <RvCommon/MetalPresentWidget.h>
 #else
@@ -1009,6 +1010,26 @@ namespace Rv
         rebuildGLView(stereo, vsync, b, red, green, blue, alpha);
     }
 
+    bool RvDocument::present16FSupported()
+    {
+#ifdef PLATFORM_DARWIN
+        return true; // Metal/QRhi EDR surface
+#else
+        // Vulkan present surface exists, but only Wayland gives it a
+        // colour-managed swapchain worth having.
+        return QGuiApplication::platformName().startsWith(QLatin1String("wayland"));
+#endif
+    }
+
+    const char* RvDocument::present16FLabel()
+    {
+#ifdef PLATFORM_DARWIN
+        return "Metal 64 RGBA 16 bits/ch float";
+#else
+        return "Vulkan 64 RGBA 16 bits/ch float";
+#endif
+    }
+
     void RvDocument::setDisplayOutput(DisplayOutputType type)
     {
         const bool vsync = m_glView->format().swapInterval() == 1;
@@ -1020,6 +1041,29 @@ namespace Rv
         int green = m_glView->format().greenBufferSize();
         int blue = m_glView->format().blueBufferSize();
         int alpha = m_glView->format().alphaBufferSize();
+
+        // 16f is not a QOpenGLWidget surface format: the GL widget keeps its
+        // default format and stays a transfer buffer, while the float precision
+        // and the colour-managed swapchain live in the platform present
+        // surface. So this case switches the surface on, not the GL bits.
+        if (type == PresentSurface16F)
+        {
+            if (!present16FSupported())
+                return;
+            IPCore::setDisplayHDRMode(IPCore::defaultDisplayHDRMode());
+            red = green = blue = alpha = 0;
+            createPresentSurface();
+            rebuildGLView(stereo, vsync, dbl, red, green, blue, alpha);
+            return;
+        }
+
+        // Leaving 16f: drop the present surface so the GL widget presents
+        // directly again.
+        if (m_presentSurfaceWidget)
+        {
+            IPCore::setDisplayHDRMode(IPCore::DisplayHDRMode::Off);
+            destroyPresentSurface();
+        }
 
         switch (type)
         {

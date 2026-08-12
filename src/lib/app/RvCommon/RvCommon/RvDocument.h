@@ -100,8 +100,19 @@ namespace Rv
         {
             OpenGLDefaultFormat, // whatever you get
             OpenGL8888,          // 8 bits per channel + (maybe) alpha
-            OpenGL1010102        // 10 bits per channel + (maybe) 2 bits alpha
+            OpenGL1010102,       // 10 bits per channel + (maybe) 2 bits alpha
+            // 16 bits/ch float, presented through the platform's own surface
+            // (Metal on macOS, Vulkan on Wayland) instead of the GL widget.
+            // The GL widget stays at its default format and acts as a transfer
+            // buffer; the float precision lives in GLView's RGBA16F present FBO
+            // and the present swapchain.
+            PresentSurface16F
         };
+
+        // True where a 16f present surface backend exists.
+        static bool present16FSupported();
+        // Label for PresentSurface16F, which names the API actually used.
+        static const char* present16FLabel();
 
         void setStereo(bool);
         void setVSync(bool);

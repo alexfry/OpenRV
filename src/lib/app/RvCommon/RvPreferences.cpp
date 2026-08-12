@@ -290,6 +290,13 @@ namespace Rv
 
         connect(m_ui.jpegRGBAToggle, SIGNAL(stateChanged(int)), this, SLOT(jpegRGBAChanged(int)));
 
+        // Added here rather than in the .ui so the label can name the API that
+        // is actually in use, and so it is simply absent where no backend
+        // exists (Windows, X11) instead of present-but-broken. Index matches
+        // RvDocument::PresentSurface16F.
+        if (RvDocument::present16FSupported())
+            m_ui.displayOutputCombo->addItem(RvDocument::present16FLabel());
+
         connect(m_ui.displayOutputCombo, SIGNAL(activated(int)), this, SLOT(displayOutputChanged(int)));
 
         connect(m_ui.fontSizeSpinBox, SIGNAL(editingFinished()), this, SLOT(fontChanged()));
@@ -657,7 +664,12 @@ namespace Rv
 
         int dindex = 0;
 
-        if (opts.dispRedBits == 8 && opts.dispGreenBits == 8 && opts.dispBlueBits == 8 && opts.dispAlphaBits == 8)
+        if (settings.value("dispPresentSurface16F", 0).toInt() != 0
+            && RvDocument::present16FSupported())
+        {
+            dindex = 3;
+        }
+        else if (opts.dispRedBits == 8 && opts.dispGreenBits == 8 && opts.dispBlueBits == 8 && opts.dispAlphaBits == 8)
         {
             dindex = 1;
         }
@@ -1407,6 +1419,10 @@ namespace Rv
         settings.setValue("vsync", m_ui.displayVideoSyncButton->checkState() == Qt::Checked ? 1 : 0);
 
         int rbits = 0, gbits = 0, bbits = 0, abits = 0;
+        // 16f cannot be expressed as GL surface bit depths — the GL widget keeps
+        // its default format — so it needs its own setting rather than being
+        // inferred from the bit counts like the others.
+        int present16F = 0;
 
         switch (m_ui.displayOutputCombo->currentIndex())
         {
@@ -1421,6 +1437,9 @@ namespace Rv
             bbits = gbits = rbits = 10;
             abits = 2;
             break;
+        case 3:
+            abits = bbits = gbits = rbits = 0;
+            present16F = 1;
             break;
         }
 
@@ -1428,6 +1447,7 @@ namespace Rv
         settings.setValue("dispGreenBits", gbits);
         settings.setValue("dispBlueBits", bbits);
         settings.setValue("dispAlphaBits", abits);
+        settings.setValue("dispPresentSurface16F", present16F);
         settings.endGroup();
 
         //----------------------------------------------------------------------
@@ -1793,6 +1813,9 @@ namespace Rv
                     break;
                 case 2:
                     t = RvDocument::OpenGL1010102;
+                    break;
+                case 3:
+                    t = RvDocument::PresentSurface16F;
                     break;
                 }
 
