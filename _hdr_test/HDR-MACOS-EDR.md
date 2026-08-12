@@ -156,11 +156,55 @@ the symptom and the same discipline the fix.
 
 Not measured: the actual speedup. Only the readback's removal is established.
 
+### Surfacing it in the UI — done
+
+`Preferences → Rendering → Display Output Format` now offers
+`Metal 64 RGBA 16 bits/ch float` (`Vulkan …` on Wayland), applied live.
+
+The design question that took the longest was **what that menu is allowed to
+say**. It settled on: the menu owns **buffer nature and API**; colour encoding
+is a separate axis, derived from the OCIO display, and must not appear there.
+Qt's `QRhiSwapChain::Format` conflates the two — `HDRExtendedSrgbLinear` and
+`HDRExtendedDisplayP3Linear` are the same 16F buffer with different primaries —
+which makes it a tempting but wrong model to copy into a UI.
+
+Two related mistakes worth not repeating:
+
+- **A "16f buffer" entry is not a `QSurfaceFormat`.** There is no float concept
+  in `QSurfaceFormat`, and `GLView` deliberately does not raise its widget's bit
+  depth when a present surface is active. The entry switches the *present
+  surface* on and leaves the GL widget alone.
+- **`PresentMode::P3Linear` / `SrgbLinear` describe a workaround, not a design.**
+  Their comments say "buffer assumed PQ codes", and `presentShaderMode()` routes
+  both to mode 2 (PQ→linear). That exists only because the Wayland branch
+  hardcoded `SMPTE2084` for all `RV_HDR`, so extended-linear surfaces had to
+  decode PQ back out. Buffer encoding and surface tag should always agree; every
+  case where they do not is a bug. Deriving the encoding from the OCIO display
+  retires this on Linux too.
+
+**8. `rebuildGLView()` raises a spurious "Display Configuration is Invalid"
+dialog.** It calls `newGLView->isValid()` before the widget is added to the
+layout and shown, and Qt's docs — quoted in RV's own source — say that is always
+false until shown. Every format change therefore takes the reset branch. It is
+pre-existing, not HDR-specific, and the 10+2 entry hits it too. The 16f path
+avoids it by not rebuilding: its GL format does not change, only the present
+surface and the pipeline encoding.
+
+**9. Attach without detach is a use-after-free.** `GLView` holds its own
+`m_presentOverlay` and `dynamic_cast`s it on every paint. `setExternalPresentWidget()`
+early-returns on null, so it cannot be used to detach. Destroying the surface
+while GLView still points at it crashes in `paintGL()` on the next frame —
+observed as `__dynamic_cast` on a freed pointer with
+`typeinfo for Rv::PresentSurface` in the registers. `clearExternalPresentWidget()`
+now exists and must be called before the delete. The Vulkan backend never hit
+this because it never destroys its surface.
+
 ### Still not done
 
 - **Surface tag driven by the OCIO display.** The encoding is chosen by
   platform default, not derived from the OCIO display colorspace as
-  `HDR-SURFACE-DESIGN.md` requires.
+  `HDR-SURFACE-DESIGN.md` requires. This is now the main remaining gap, and it
+  is what makes the wider set of OCIO display spaces tractable.
 - **Headroom is measured but unused.** Nothing adapts to it and nothing warns
   when content exceeds it.
 

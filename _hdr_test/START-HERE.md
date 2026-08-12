@@ -54,11 +54,45 @@ Xcode 26.6 / OCIO 2.5.2.
 |---|---|
 | `PresentSurface` — backend-neutral present interface | `RvCommon/PresentSurface.h` |
 | Metal/QRhi EDR present surface | `RvCommon/MetalPresentWidget.{h,mm}` |
-| Per-platform backend selection | `RvDocument.cpp` |
+| Zero-copy GL↔Metal sharing | `RvCommon/IOSurfaceSharedImage.{h,mm}` |
+| Per-platform backend selection, surface create/destroy | `RvDocument.cpp` |
 | Display P3 Extended encoding (macOS default) | `DisplayIPNode.cpp`, `GLView.cpp` |
+| Single source of truth for the encoding | `IPCore/DisplayHDRMode.h` |
+| Preferences entry | `RvPreferences.cpp` |
 | Embedding spike | `spike_b/` |
 
-Environment:
+### The UI
+
+**Preferences → Rendering → Display Output Format** gains one entry:
+
+```
+OpenGL Default Format
+OpenGL 32 RGBA 8 bits/ch
+OpenGL 32 RGB+A 10+2 bits/ch
+Metal 64 RGBA 16 bits/ch float        ← macOS
+Vulkan 64 RGBA 16 bits/ch float       ← Wayland
+```
+
+It applies live — no restart — and switches back cleanly.
+
+The entry names **API and bit depth only**. Colour encoding is deliberately
+absent: that is a separate axis which will be derived from the OCIO display
+(`HDR-SURFACE-DESIGN.md` §3), not chosen here. Qt's `QRhiSwapChain::Format`
+conflates the two (`HDRExtendedSrgbLinear` and `HDRExtendedDisplayP3Linear` are
+the same 16F buffer with different primaries); this menu does not.
+
+16f is **not** a `QSurfaceFormat`: there is no float concept there, and
+`GLView` deliberately does not tag or raise the bit depth of its widget when a
+present surface is active. Selecting it leaves the GL widget at its default
+format and switches the present surface on instead; the float precision lives
+in GLView's RGBA16F present FBO and the present swapchain. Persisted as its own
+`dispPresentSurface16F` setting, since it cannot be inferred from r/g/b/a bit
+depths like the other entries.
+
+### Environment
+
+Env vars still work and now **seed** the shared state rather than being the
+mechanism; the preference overrides them.
 
 | Variable | Meaning |
 |---|---|
@@ -66,13 +100,17 @@ Environment:
 | `RV_HDR_ENCODING=pq\|p3extended` | buffer encoding. Default `p3extended` on macOS, `pq` elsewhere |
 | `RV_METAL_PRESENT` | force the Metal surface on/off independently of `RV_HDR` |
 | `RV_MACOS_PRESENT_MODE` | override the present-shader decode mode |
+| `RV_MACOS_GPU_INTEROP=0` | force the CPU readback path instead of IOSurface |
 | `RV_METAL_PRESENT_DEBUG=1` | log widget/container/window visibility and sizes |
 
-**Three stages must agree on the encoding**, and nothing enforces it:
-`DisplayIPNode` (what goes in the buffer) → `GLView` (how the GL surface is
-tagged) → `MetalPresentWidget` (which decode mode). A mismatch produces a
-plausible-looking but wrong image. This is the strongest argument for the
-canonical registry in `HDR-SURFACE-DESIGN.md` owning the encoding.
+**Three stages must agree on the encoding**: `DisplayIPNode` (what goes in the
+buffer) → `GLView` (how the GL surface is tagged) → `MetalPresentWidget` (which
+decode mode). They now all read `IPCore::displayHDRMode()`, so they cannot
+drift apart — but that enum is still a stand-in for the descriptor-driven
+resolver in `HDR-SURFACE-DESIGN.md` §3.
+
+It lives in **IPCore** because both readers need it from different libraries:
+`Rv::Options` is in RvApp, *above* IPCore, so it cannot be the home.
 
 **Linux is unaffected** by all of it: `RV_HDR_ENCODING` defaults to `pq` off
 Darwin, the Vulkan sources are unchanged, and `VulkanPresentWidget.cpp` /
@@ -80,9 +118,27 @@ Darwin, the Vulkan sources are unchanged, and `VulkanPresentWidget.cpp` /
 Linux** — the `PresentSurface` refactor touches `GLView.cpp`, so rebuild on the
 Arch box before trusting it there.
 
-Not done: GPU interop (CPU readback for now — the IOSurface path is still
-unimplemented), deriving the surface tag from the OCIO display, and doing
-anything with measured headroom.
+Not done: deriving the surface tag from the OCIO display, and doing anything
+with measured headroom.
+
+### Two traps in the surrounding code, found the hard way
+
+**`rebuildGLView()` shows a spurious "Display Configuration is Invalid"
+dialog.** It checks `newGLView->isValid()` *before* adding the widget to the
+layout and showing it — and Qt's docs, quoted in RV's own source at
+`GLView.cpp` ~462, say that is **always false until the widget is shown**. So
+any format change takes the reset branch and raises the dialog. This is
+pre-existing and affects the 10+2 entry too; the 16f path sidesteps it by not
+rebuilding at all, but the underlying check is still wrong.
+
+**Attach/detach asymmetry around the present overlay.** `GLView` keeps its own
+`m_presentOverlay` and `dynamic_cast`s it on **every paint**. There was an
+attach path (`setExternalPresentWidget`) but no detach — and it early-returns
+on null, so passing nullptr is silently a no-op. Destroying the surface without
+telling GLView is a use-after-free that crashes on the next frame. Now handled
+by `clearExternalPresentWidget()`, which `destroyPresentSurface()` calls first.
+The Vulkan path never hit this because it never destroys its surface; making
+the surface switchable from the UI is what exposed it.
 
 ---
 
