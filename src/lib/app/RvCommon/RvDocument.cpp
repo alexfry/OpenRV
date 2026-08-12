@@ -788,9 +788,10 @@ namespace Rv
 
     bool RvDocument::wantHdrPresent()
     {
-        const char* hdr = getenv("RV_HDR");
-        return hdr && *hdr && strcmp(hdr, "0") && strcmp(hdr, "false") && strcmp(hdr, "off")
-               && strcmp(hdr, "no");
+        // Shared state, not getenv: RV_HDR seeds it, but the Display Output
+        // Format preference sets it too, and this is what decides whether the
+        // present surface gets created at all.
+        return IPCore::displayHDREnabled();
     }
 
     void RvDocument::createPresentSurface()
@@ -859,6 +860,10 @@ namespace Rv
     {
         if (!m_presentSurfaceWidget)
             return;
+        // Detach from GLView first — it dynamic_casts m_presentOverlay on every
+        // paint, so leaving it dangling crashes on the next frame.
+        if (m_glView)
+            m_glView->clearExternalPresentWidget();
         m_stackedLayout->removeWidget(m_presentSurfaceWidget);
         m_presentSurfaceWidget->deleteLater();
         m_presentSurfaceWidget = nullptr;
@@ -1051,18 +1056,25 @@ namespace Rv
             if (!present16FSupported())
                 return;
             IPCore::setDisplayHDRMode(IPCore::defaultDisplayHDRMode());
-            red = green = blue = alpha = 0;
             createPresentSurface();
-            rebuildGLView(stereo, vsync, dbl, red, green, blue, alpha);
+            // Deliberately no rebuildGLView(): the GL widget's format does not
+            // change (16f is not a QSurfaceFormat), only the present surface
+            // and the pipeline encoding, which the next graph evaluation picks
+            // up. Rebuilding here would also trip the isValid() check below,
+            // which is always false before the widget is shown and so always
+            // raises the "Display Configuration is Invalid" dialog.
+            m_glView->update();
             return;
         }
 
         // Leaving 16f: drop the present surface so the GL widget presents
-        // directly again.
+        // directly again. Same reasoning — no rebuild needed unless the GL bit
+        // depths themselves change, which the switch below handles.
         if (m_presentSurfaceWidget)
         {
             IPCore::setDisplayHDRMode(IPCore::DisplayHDRMode::Off);
             destroyPresentSurface();
+            m_glView->update();
         }
 
         switch (type)

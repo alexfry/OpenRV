@@ -78,6 +78,8 @@ namespace Rv
         // Attach a present surface created before this GLView (Vulkan seed).
         // Does not take ownership if parented elsewhere.
         void setExternalPresentWidget(QWidget* present);
+        // Detach before destroying the overlay: paintGL() casts it every frame.
+        void clearExternalPresentWidget();
 
         // FBO the video device should render into (float present FBO or widget).
         GLuint presentFramebufferObject() const;

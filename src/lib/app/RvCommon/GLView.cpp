@@ -624,6 +624,20 @@ namespace Rv
             m_presentOverlay->show();
     }
 
+    void GLView::clearExternalPresentWidget()
+    {
+        // Must be called before the overlay is destroyed. paintGL() and the
+        // present path dynamic_cast m_presentOverlay every frame, so a stale
+        // pointer here is a use-after-free rather than a missed repaint.
+        if (!m_presentOverlay)
+            return;
+        m_presentOverlay->removeEventFilter(this);
+        m_presentOverlay = nullptr;
+        // The float FBO is only wanted while a present surface needs it;
+        // ensureFloatPresentFbo() releases it on the next paint, with a current
+        // GL context.
+    }
+
     PresentSurface* GLView::presentSurface() const
     {
         // PresentSurface is not a QObject, so this is dynamic_cast rather than
